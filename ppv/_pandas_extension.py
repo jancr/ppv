@@ -4,14 +4,23 @@ import concurrent.futures
 import collections
 import typing
 from collections import abc
+import pickle
+import math
+import warnings
 
 # 3rd party imports
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 import seaborn as sns
 import tqdm
 from peputils.proteome import fasta_to_protein_hash
 from sequtils import SequenceRange
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.externals import joblib
+from sklearn.pipeline import make_pipeline
+#  import matplotlib.patches as mpatches
 
 # local
 from .protein import ProteinFeatureExtractor
@@ -63,12 +72,11 @@ class ArgumentConverter:
         raise ValueError(error.format(type(proteome)))
 
 
-@pd.api.extensions.register_dataframe_accessor("ppv")
+@pd.api.extensions.register_dataframe_accessor("ppv_feature_extractor")
 class PandasPPV:
     """
     This object manipulates a UPF dataframe and adds the features nessesary for
     prediction peptide variants (PPV)
-    such as extracting feature from the upf data frame
     """
 
     def __init__(self, df):
@@ -134,36 +142,223 @@ class PandasPPV:
         return pfe, pfe.create_feature_df(delta_imp, peptides)
 
 
-@pd.api.extensions.register_dataframe_accessor("ppv_features")
+@pd.api.extensions.register_dataframe_accessor("ppv")
 class PandasPPVFeatures:
     """
-    This object manipulates the ppv feature object
+    This object manipulates a DataFrame containing ppv feature object
     """
 
-    def __init__(self, df):  # , protein_features=None):
+    def __init__(self, df):
         _validate(df)
         self.df = df
 
-    def plot(self, path, show=False):
+    @property
+    def predictors(self):
+        if "Annotations" in self.df.columns:
+            return self.df.drop("Annotations", axis=1)
+        return self.df.copy()
+
+    @property
+    def positives(self):
+        return self.df[self.target.astype(bool)]
+
+    @property
+    def negatives(self):
+        return self.df[~self.target.astype(bool)]
+
+    @property
+    def target(self):
+        return self.df["Annotations", "Known"]
+
+    #  @property
+    #  def annotations(self):
+    #      return self.df["Annotations"]
+
+    @classmethod
+    def _seq_to_modseq(cls, row):
+        mod_seq = "_{{n}}{}_{{c}}".format(row["Annotations", "Sequence"])
+        n_term = c_term = ""
+        if row["MS Frequency", "acetylation"] > 0.05:
+            n_term = "(ac)"
+        if row["MS Frequency", "amidation"] > 0.05:
+            c_term = "(am)"
+        return mod_seq.format(n=n_term, c=c_term)
+
+    def to_variants(self):
+        df = self.df.copy()
+        df["mod_seq"] = df.apply(self._seq_to_modseq, axis=1)
+        df["origin"] = "collapsed"
+        return df.set_index("mod_seq", append=True).set_index("origin", append=True)
+
+    @classmethod
+    def load_model(cls, path):
+        clf, scaler = pickle.loads(open(path, 'rb'))
+
+    @classmethod
+    def save_model(clf, scaler, path="pickle/model.pickle"):
+        pickle.dump((clf, scaler), open(path, "wb"))
+
+    def _transform(self):
+        """
+        Transforms Features so they are more predictive
+        This is achived by changing
+            changing charge to net charge (difference from zero)
+            changing pI to "distance from neutral"
+        """
+        if "Chemical" not in self.df:
+            warnings.warn("Chemical is not in the index...")
+            return self.df
+        chem = self.df["Chemical"]
+
+        exp_columns = set(ProteinFeatureExtractor.chemical_features.features)
+        if exp_columns != set(chem.columns):
+            warnings.warn("Chemical seems to be already transformed")
+            return self.df
+
+        features_fixed = self.df.copy()
+        for bad_feature in ("Charge", "ChargeDensity", "pI"):
+            del features_fixed["Chemical", bad_feature]
+        features_fixed["Chemical", "Net Charge"] = self.df["Chemical", "Charge"].abs()
+        _cd = self.df["Chemical", "ChargeDensity"].abs()
+        features_fixed["Chemical", "Net ChargeDensity"] = _cd
+        features_fixed["Chemical", "abs(pI - 7)"] = (self.df["Chemical", "pI"] - 7).abs()
+        #  features_fixed.pop("Annotations")
+        return features_fixed
+
+    def _get_scaler(self):
+        return StandardScaler().fit(self.predictors)
+
+    def _scale_predictors(self, scaler=None):
+        if scaler is None:
+            scaler = self.get_scaler()
+        predictors = self.predictors
+        predictors_scaled = pd.DataFrame(scaler.transform(predictors), index=predictors.index,
+                                         columns=predictors.columns)
+        for name, series in self.df["Annotations"].iteritems():
+            predictors_scaled["Annotations", name] = series
+        return predictors_scaled
+
+    #  def _train(self, **kwargs):
+    #      model = LogisticRegression(random_state=0, max_iter=5000, **kwargs)
+    #      return model.fit(self.predictors, self.target.astype(int))
+
+    def predict(self, model):
+        predictors = self._transform().ppv.predictors
+
+        if isinstance(model, str):
+            model = joblib.load(model)
+        predictions = model.predict_proba(predictors)[:, 1]
+        return pd.Series(predictions, index=self.df.index, name=("Annotations", "PPV"))
+
+    def create_model(self, path=None, *, random_state=0, max_iter=5000, **kwargs):
+        features_transformed = self._transform()
+
+        scaler = features_transformed.ppv._get_scaler()
+        logistic_model = LogisticRegression(random_state=random_state, max_iter=max_iter, **kwargs)
+        pipline = make_pipeline(scaler, logistic_model)
+
+        model = pipline.fit(features_transformed.ppv.predictors, self.target.astype(int))
+        if path:
+            joblib.dump(model, path)
+        return model
+
+    def transform_to_null_features(self):
+        df = self.subset({})  # delete all features
+        df["Null", "Intensity"] = df["Annotations", "Intensity"]
+        return df
+
+    def _class_balance(self, target, class_balance):
+        known_selector = self.df[target]
+        positives = self.df[known_selector]
+        negatives = self.df[~known_selector]
+        if class_balance is not None:
+            n_negatives = self.df.shape[0] - positives.shape[0]
+            negatives = negatives.sample(frac=class_balance * positives.shape[0] / n_negatives)
+        return pd.concat((positives, negatives))
+
+    def plot_pair_grid(self, path=None, class_balance=None, target=("Annotations", "Known")):
         sns.set(style="ticks", color_codes=True)
-        # TODO: make known bool the correct place!!!!
-        positives = self.df[self.df["Target", "known"]]
-        negatives = self.df[~self.df["Target", "known"]].sample(positives.shape[0] * 10)
-        data = pd.concat((positives, negatives))
+        data = self._class_balance(target, class_balance)
+        g = sns.PairGrid(data.sample(frac=1), hue=target, hue_kws={"cmap": ["Greens", "Reds"]})
+        g = g.map_diag(plt.hist)
+        g = g.map_offdiag(plt.scatter)
+        if isinstance(path, str):
+            g.savefig(path)
+        return g
 
-        g = sns.PairGrid(data, hue=("Target", "known"), hue_kws={"cmap": ["Greens", "Reds"]})
-        #  g = g.map_diag(sns.kdeplot, lw=3)
-        #  g = g.map_offdiag(sns.kdeplot, lw=1)
-        g = g.map_diag(sns.kdeplot)
-        g = g.map_offdiag(sns.kdeplot)
-        g.savefig(path)
-        #  peptide_features.ppv_features.generate_xfolds()
-        #  print(peptide_features)
+    def subset(self, feature_types, keep_annotations=True):
+        if isinstance(feature_types, str):
+            feature_types = {feature_types}
+        feature_types = set(feature_types)
 
-    def train(self):
-        #  y = self.df["Target", "known"]
-        #  features = self.df
-        raise NotImplementedError("TODO!!")
+        if keep_annotations:
+            feature_types.add("Annotations")
+        all_feature_types = set(self.df.columns.get_level_values(0))
+        feature_types_to_drop = all_feature_types - set(feature_types)
+        return self.drop(feature_types_to_drop)
+
+    def drop(self, feature_types):
+        if isinstance(feature_types, str):
+            feature_types = {feature_types}
+        df = self.df.copy()
+        for feature_type in feature_types:
+            df.drop(feature_type, inplace=True, axis=1)
+        return df
+
+    def create_histograms(self, axes_size=2):
+        df = self.df.copy()
+        #  if features is not None:
+        #      df = df[list(features) + "Annotations"]
+        known = df.ppv.positives.ppv.predictors
+        unknown = df.ppv.negatives.ppv.predictors
+
+        n_col = math.ceil(known.shape[-1] ** 0.5)
+        n_row = math.ceil(known.shape[-1] / n_col)
+        fig = plt.figure(figsize=(n_col * axes_size, n_row * axes_size))
+        axes = fig.subplots(n_row, n_col)
+        for ax, feature in zip(axes.flatten(), df.ppv.predictors.columns):
+            bins = np.linspace(df[feature].min(), df[feature].max(), 15)
+            #  green = ax.hist(known[feature], bins, density=True, alpha=0.5, color='g')
+            #  red = ax.hist(unknown[feature], bins, density=True, alpha=0.5, color='r')
+            ax.hist(known[feature], bins, density=True, alpha=0.5, color='g')
+            ax.hist(unknown[feature], bins, density=True, alpha=0.5, color='r')
+            ax.set_title(' '.join(feature))
+            #  legends = [mpatches.Patch(color='g', label='known'),
+            #              mpatches.Patch(color='r', label='unknown')]
+        #  fig.legend((green, red), ("known", "unknown"), loc='upper right')
+        return fig
+
+    def plot_hist(self, path=None, class_balance=None, target=("Annotations", "Known")):
+        data = self._class_balance(target, class_balance)
+        g = data.hist()
+        if isinstance(path, str):
+            g.savefig(path)
+        return g
+
+        raise NotImplementedError("TODO!!!")
+        #  known_selector = self.df[target]
+        #  positives = self.df[known_selector]
+        #  negatives = self.df[~known_selector]
+        #  if class_balance is not None:
+        #      n_negatives = self.df.shape[0] - positives.shape[0]
+        #      negatives = negatives.sample(frac=class_balance * positives.shape[0] / n_negatives)
+        #  data = pd.concat((positives, negatives))
+        #
+        #  g = sns.PairGrid(data.sample(frac=1), hue=target, hue_kws={"cmap": ["Greens", "Reds"]})
+        #  g = g.map_diag(plt.hist)
+        #  g = g.map_offdiag(plt.scatter)
+        #  if isinstance(path, str):
+        #      g.savefig(path)
+        #  return g
+
+    #  def train(self, predictors=("MS Intensity", "MS Frequency", "MS counts")):
+    #      # TODO: remember to split... try different models?
+    #      df = self.df.copy()
+    #      predictors = df[list(predictors)]
+    #      target = df.pop("Target").astype(int)["known"]
+    #
+    #      model = LogisticRegression(random_state=0, solver='lbfgs', multi_class='multinomial')
+    #      return model.fit(predictors, target)  # classifier
 
     def split(self, xfolds=5):
         raise NotImplementedError("TODO!!")

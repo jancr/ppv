@@ -12,7 +12,7 @@ import pandas as pd
 
 # jcr modules
 import peputils  # noqa
-from peputils import fasta_to_protein_hash
+from peputils.proteome import fasta_to_protein_hash
 
 # local imports
 #  from ppv.protein import ProteinFeatureExtractor
@@ -23,6 +23,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", help="number of processes", default=16, type=int)
     parser.add_argument("--load", help="load pickle module", action="store_true", default=False)
+    parser.add_argument("--train", help="train model", action="store_true", default=False)
     return parser.parse_args()
 
 
@@ -42,9 +43,11 @@ def create_features(load, processes):
     mouse_proteins = fasta_to_protein_hash(mouse_fasta)
     known_file = "tests/test_data/10090_known.tsv"
 
-    base_pickle_file = 'pickle/mouse_peptide_features_{}.pickle'
+    #  base_pickle_file = 'pickle/mouse_peptide_features_{}.pickle'
     if load:
-        features = [pickle.load(open(base_pickle_file.format(c), 'rb')) for c in campaign_names]
+        #  features = [pickle.load(open(base_pickle_file.format(c), 'rb')) for c in campaign_names]
+        #  features = [features[0]]  # TODO delete me
+        return pickle.load(open("pickle/mouse_features.pickle", 'rb'))
     else:
         _iter = zip(base_files, campaign_names)
         _iter = tqdm.tqdm(_iter, "Creating Features", total=len(campaign_names))
@@ -60,21 +63,43 @@ def create_features(load, processes):
             df = df_raw.peptidomics.normalize()
 
             # features
-            dataset_features = df.ppv.create_feature_df(mouse_proteins, n_cpus=processes,
-                                                        known=known_file, peptides='fair')
+            dataset_features = df.ppv_feature_extractor.create_feature_df(
+                mouse_proteins, n_cpus=processes, known=known_file, peptides='valid')
             features.append(dataset_features)
 
             # pickle
             pickle_file = 'pickle/mouse_peptide_features_{}.pickle'.format(campaign_name)
             pickle.dump(dataset_features, open(pickle_file.format(campaign_name), 'wb'))
 
-    return pd.concat(features)
+    features = pd.concat(features)
+    target = features["Annotations", "Known"].astype(bool).astype('category')
+    features["Annotations", "Known"] = target
+    pickle.dump(features, open('pickle/mouse_features.pickle', 'wb'))
+    return features
 
 
-#  def plot(df):
-#      df.ppv_features.plot("ppv_features_joinplot.pdf")
+def train_model(features):
+    if isinstance(features, str):
+        features = pickle.loads(open(features, 'rb'))
+
+    model = features.ppv_features.create_model("pickle/ppv.model")
+    print(features.ppv_features.predict(model))
+    #  print(features.ppv_features.predict("pickle/ppv.model"))
+
+    #  # fix features
+    #  features_transformed = features.ppv_features.transform()
+    #  scaler = features_transformed.ppv_features.get_scaler()
+    #  features_scaled = features_transformed.ppv_features.scale_predictors(scaler)
+    #
+    #  # train
+    #  clf = features_scaled.ppv_features.train()
+    #  pd.DataFrame.ppv_features.save_model(clf, scaler, "pickle/model.pickle",)
+    #  #  pickle.dump((clf, scaler), open("pickle/model.pickle", "wb"))
+    #  return clf, scaler
 
 
 if __name__ == '__main__':
     args = parse_args()
-    create_features(args.load, args.p)
+    features = create_features(args.load, args.p)
+    if args.train:
+        train_model(features)

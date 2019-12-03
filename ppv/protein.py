@@ -4,6 +4,7 @@ from typing import Collection
 import math
 import itertools
 import collections
+import typing
 
 # 3rd party imports
 import numpy as np
@@ -15,22 +16,35 @@ from modlamp.descriptors import PeptideDescriptor, GlobalDescriptor
 from sequtils import SequenceRange
 
 
+#  np.seterr(all='raise')
+
+
 FeatureTuple = collections.namedtuple("FeatureTuple", ("type", "features"))
 
 
 class ProteinFeatureExtractor:
+    """
+    This function holds all the matrices needed to create MS and Chemical features for peptides
+    """
+
+    #  ms_impute = FeatureTuple(
+    #      "MS Imputation",
+    #      ["{}_{}" for pos in ("start", "stop") for delta in (
+    #                                       ("start", "stop", "penalty_start", "penalty_stop"))
     ms_intensity_features = FeatureTuple("MS Intensity",
-                                         ("d_start", "d_stop", "pd_start", "pd_stop"))
-    ms_feequency_features = FeatureTuple("MS Frequency",
-                                         ("f_ac", "f_am", "f_start", "f_stop", "f_obs"))
+                                         ("start", "stop", "penalty_start", "penalty_stop"))
+    ms_frequency_features = FeatureTuple(
+        "MS Frequency",
+        ("acetylation", "amidation", "start", "stop", "observed", "bond", "sample", "ladder",
+         "protein_coverage", "cluster_coverage"))
+    ms_count_features = FeatureTuple("MS Count", ("start", "stop"))
+    #  ms_count_features = FeatureTuple("MS Count", ("start", "stop", "ladder",))
     chemical_features = FeatureTuple(
         "Chemical",
         ("Charge", "ChargeDensity", "pI", "InstabilityInd", "Aromaticity",
          "AliphaticInd", "BomanInd", "HydrophRatio", "eisenberg"))
-    """
-    This function holds all the matrices needed to score all peptides from one
-    protein, "predict" is then called repeatetly to score each peptide
-    """
+    annotations = FeatureTuple("Annotations", ("Known", "Cluster", "Intensity", "Sequence"))
+    annotation_dtypes = {"Known": "category", "Cluster": int, "Intensity": float, "Sequence": str}
 
     def __init__(self, df_protein: pd.DataFrame,
                  protein_sequence: str,
@@ -52,7 +66,8 @@ class ProteinFeatureExtractor:
         self.campaign_id, self.protein_id = df_protein.index[0][:2]
         self.n_samples = df_protein.shape[1]
         self.known_peptides = known_peptides
-        self.upf_entries = {SequenceRange(pep_var_id.start, pep_var_id.stop): data.sum()
+        self.upf_entries = {SequenceRange(pep_var_id.start, pep_var_id.stop,
+                                          full_sequence=self.protein_sequence): data.sum()
                             for pep_var_id, data in df_protein.peptidomics.iterrows()
                             if data.dropna().shape[0] != 0}
         self.df = df_protein
@@ -63,18 +78,51 @@ class ProteinFeatureExtractor:
 
         self.no_aa = self.h == 0
         self.h_cluster = self.get_cluster_histogram(self.no_aa)
+        self.clusters = self.get_clusters(self.h_cluster)
+        self.protein_coverage = self.calc_coverage(self.no_aa)
+        self.cluster_coverage = self.calcuate_cluster_coverage(self.clusters, self.h_cluster,
+                                                               self.upf_entries)
 
         self.valid_starts, self.valid_stops = self.get_valid_positions(self.upf_entries,
                                                                        self.h_cluster)
-        self.valid_peptides = self.get_valid_peptides(self.valid_starts, self.valid_stops)
+        self.valid_peptides = self.get_valid_peptides(self.valid_starts, self.valid_stops,
+                                                      self.protein_sequence)
         self.findable = set(self.known_peptides) & self.valid_peptides.keys()
         self.fair_peptides = self.get_fair_peptides(self.valid_peptides, self.findable)
+
+        # counts
+        self.start_counts, self.stop_counts = self.get_possition_counts(self.upf_entries)
 
         # calc % acetylations and methylations
         self.h_start_freq = self.normalize_histogram(self.h_start, self.h)
         self.h_stop_freq = self.normalize_histogram(self.h_stop, self.h)
         self.ac_freq = self.normalize_histogram(self.h_ac, self.h_start)
         self.am_freq = self.normalize_histogram(self.h_am, self.h_stop)
+
+        # create ladders
+        #  self.h_ladder_start = self.count_ladders(self.valid_starts, self.h_cluster,
+        #                                           ladder_window=10)
+        #  self.h_ladder_stop = self.count_ladders(self.valid_stops, self.h_cluster, self.clusters,
+        #                                          ladder_window=10)
+        self.h_ladder_start = self.count_ladders(self.start_counts, self.h_cluster, self.clusters,
+                                                 ladder_window=10)
+        self.h_ladder_stop = self.count_ladders(self.stop_counts, self.h_cluster, self.clusters,
+                                                ladder_window=10)
+
+    def create_imputation_df(self, delta_imputations: typing.List[float]):
+        if delta_imputations.min() < 0:
+            raise ValueError("You cannot downshift by a negative number!")
+        imputation_values = []
+        for delta_imp in delta_imputations:
+            imputation_values.append(max(self.log10_median - delta_imp, 0))
+
+        # TODO one of thise:
+        # a) make start/stop into annotatons along with:
+        #    is_first / is_last (next to no_aa)
+        #    and add thise to "Annotations"
+        #    a1) make a function ala "impute(imp_val) that updates "start/stop"
+        # b) finish the above function, by factorizing helper methods out from the one below and
+        #    make "Imputation" feature such as start_1 start_1.5 start_2 etc
 
     def create_feature_df(self, delta_imp: int, peptides: str = 'valid'):
         if delta_imp < 0:
@@ -85,7 +133,7 @@ class ProteinFeatureExtractor:
         # depends on w_imp_val
         imp_val = max(self.log10_median - delta_imp, 0)
         #  h10 = self.fake_log10(self.h, imp_val)
-        self.h_overlap = np.zeros(self.length)
+        #  self.h_overlap = np.zeros(self.length)
 
         #  h10_padded = np.ones(self.length + 2) * imp_val
         #  h10_padded[1:-1] = h10
@@ -94,33 +142,37 @@ class ProteinFeatureExtractor:
         self.start_scores, self.stop_scores = self.get_scores(self.h, imp_val)
 
         # get peptides and stabalize looping order, so we can use df.iloc
-        peptides = list(sorted(self.get_peptides_by_type(peptides)))
+        peptides = sorted((p, c) for (p, c) in self.get_peptides_by_type(peptides).items())
+        #  peptides = list(sorted((p, c) for (p, c) in self.get_peptides_by_type(peptides)))
 
         # pre allocate df
         #  annotations = ["known"]
         make_features = lambda t: zip(itertools.repeat(t.type), t.features)
-        feature_list = (self.ms_intensity_features, self.ms_feequency_features,
-                        self.chemical_features)
+        feature_list = (self.ms_intensity_features, self.ms_frequency_features,
+                        self.ms_count_features, self.chemical_features, self.annotations)
         features = list(itertools.chain(*map(make_features, feature_list)))
-        features += [["Target", "known"]]
+        #  features += [["Annotations", "Known"]]
 
         _names = ('campaign_id', 'protein_id', 'start', 'stop')
-        _tuples = [(self.campaign_id, self.protein_id, *p.pos) for p in peptides]
+        _tuples = [(self.campaign_id, self.protein_id, *p.pos) for (p, c) in peptides]
         index = pd.MultiIndex.from_tuples(_tuples, names=_names)
         columns = pd.MultiIndex.from_tuples(features)
         types = {c: float for c in columns}
-        types['Target', 'known'] = bool
+        # Annotations have different types
+        #  types['Target', 'known'] = bool
+        for annotation_name, annotation_dtype in self.annotation_dtypes.items():
+            types[self.annotations.type, annotation_name] = annotation_dtype
 
         df = pd.DataFrame(np.zeros((len(peptides), len(features))) * np.nan,
                           index=index, columns=columns).T
-        for peptide in peptides:
+        for peptide, n_cluster in peptides:
             _index = (self.campaign_id, self.protein_id, peptide.start.pos, peptide.stop.pos)
-            peptide_series = self._add_features_to_peptide_series(peptide, df.index)
+            peptide_series = self._add_features_to_peptide_series(peptide, df.index, n_cluster)
             df[_index] = peptide_series
         return df.T.astype(types)
 
     # helper methods
-    def _add_features_to_peptide_series(self, peptide, index):
+    def _add_features_to_peptide_series(self, peptide, index, n_cluster=-1):
         # primary intensity weights d = delta, pd = penalty delta
         # TODO only d_start and d_stop depends on impval, pd_start and pd_stop does not because
         # they are always between a d_start and d_stop, and should thus be above imp_val!
@@ -137,34 +189,56 @@ class ProteinFeatureExtractor:
         # which is consistent with how we currently do the grid search (imp_val=4):
         #       d_start = 5 - max(0, 4) = 1
         #       d_start = 7 - max(5, 4) = 2
+        i_start = peptide.start.index
+        i_stop = peptide.stop.index
+
+        # MS Delta
         series = pd.Series(np.zeros(len(index)) * np.nan, index=index)
         ms_int = self.ms_intensity_features.type
-        series[ms_int, 'd_start'] = self.start_scores[peptide.start.index]
-        series[ms_int, 'd_stop'] = self.stop_scores[peptide.stop.index]
+        series[ms_int, 'start'] = self.start_scores[i_start]
+        series[ms_int, 'stop'] = self.stop_scores[i_stop]
 
         if 4 < len(peptide):
             penalty = SequenceRange(peptide.start + 1, peptide.stop - 1, validate=False)
-            series[ms_int, 'pd_start'] = self.start_scores[penalty.slice].sum()
-            series[ms_int, 'pd_stop'] = self.stop_scores[penalty.slice].sum()
+            series[ms_int, 'penalty_start'] = self.start_scores[penalty.slice].sum()
+            series[ms_int, 'penalty_stop'] = self.stop_scores[penalty.slice].sum()
         else:
-            series[ms_int, 'pd_start'] = series[ms_int, 'pd_stop'] = 0
+            series[ms_int, 'penalty_start'] = series[ms_int, 'penalty_stop'] = 0
 
+        # MS Frequency
         # ptm weights
         # TODO: should it get extra penalties if there are PTM's between start and end?
-        ms_freq = self.ms_feequency_features.type
-        series[ms_freq, 'f_ac'] = self.ac_freq[peptide.start.index]
-        series[ms_freq, 'f_am'] = self.am_freq[peptide.stop.index]
+        ms_freq = self.ms_frequency_features.type
+        series[ms_freq, 'acetylation'] = self.ac_freq[i_start]
+        series[ms_freq, 'amidation'] = self.am_freq[i_stop]
 
-        series[ms_freq, 'f_start'] = self.h_start_freq[peptide.start.index]
-        series[ms_freq, 'f_stop'] = self.h_stop_freq[peptide.stop.index]
-        series[ms_freq, 'f_obs'] = self._calc_f_obs(peptide)
+        series[ms_freq, 'start'] = self.h_start_freq[i_start]
+        series[ms_freq, 'stop'] = self.h_stop_freq[i_stop]
+        f_obs = self._calc_f_observed(peptide)
+        series[ms_freq, 'observed'] = f_obs
+        series[ms_freq, 'sample'] = self.h_sample[peptide.slice].min()
+        series[ms_freq, 'ladder'] = \
+            self.h_ladder_start[i_start] * self.h_ladder_stop[i_stop]
+        series[ms_freq, 'protein_coverage'] = self.protein_coverage
+        series[ms_freq, 'cluster_coverage'] = self.cluster_coverage[n_cluster]
 
-        # TODO bonds!!!!
+        # thise are good features, but there may be better ways to extract them
+        series[ms_freq, 'bond'] = self.h_bond[self.get_bond_slice(peptide)].min()
 
+        # MS Counts
+        ms_count = self.ms_count_features.type
+        series[ms_count, 'start'] = self.start_counts[peptide.start]
+        series[ms_count, 'stop'] = self.stop_counts[peptide.stop]
+        #  series[ms_count, 'ladder'] = \
+        #      self.h_ladder_start[i_start] + self.h_ladder_stop[i_stop]
+
+        ############################################################
+
+        # Chemical
         sequence = self.protein_sequence[peptide.slice]
         peptide_features = GlobalDescriptor(sequence)
 
-        is_amidated = series[ms_freq, 'f_am'] > 0.05
+        is_amidated = series[ms_freq, 'amidation'] > 0.05
         peptide_features.calculate_all(amide=is_amidated)
 
         chem = self.chemical_features.type
@@ -175,11 +249,18 @@ class ProteinFeatureExtractor:
             eisenberg = PeptideDescriptor(sequence, 'eisenberg')
             eisenberg.calculate_moment()
             series[chem, 'eisenberg'] = eisenberg.descriptor.flatten()[0]
-        series["Target", "known"] = peptide in self.known_peptides
 
+        # Annotations
+        series[self.annotations.type, "Known"] = peptide in self.known_peptides
+        #  series[self.annotations.type, "Type"] = peptide in self.known_peptides
+        series[self.annotations.type, "Cluster"] = n_cluster
+        series[self.annotations.type, "Sequence"] = peptide.seq
+        if f_obs != 0:
+            _pep_index = (slice(None), slice(None), peptide.start.pos, peptide.stop.pos)
+            series[self.annotations.type, "Intensity"] = self.df.loc[_pep_index, :].sum().sum()
         return series
 
-    def _calc_f_obs(self, peptide):
+    def _calc_f_observed(self, peptide):
         if peptide not in self.upf_entries:
             return 0
         obs_area = self.upf_entries[peptide] * peptide.length / self.n_samples
@@ -191,6 +272,18 @@ class ProteinFeatureExtractor:
         if type_ not in peptide_types:
             raise ValueError(f"{type_} not in {peptide_types.keys()}")
         return peptide_types[type_]
+
+    @classmethod
+    def calc_coverage(self, no_aa):
+        return (no_aa.shape[0] - no_aa.sum()) / no_aa.shape[0]
+
+    @classmethod
+    def calcuate_cluster_coverage(cls, clusters, h_cluster, upf_entries):
+        coverage = collections.defaultdict(int)
+        for peptide in upf_entries.keys():
+            n_cluster = h_cluster[peptide.start.index]
+            coverage[n_cluster] += len(peptide) / len(clusters[n_cluster])
+        return coverage
 
     ########################################
     # Histogram manipulation
@@ -284,15 +377,14 @@ class ProteinFeatureExtractor:
         return still_violations
 
     @classmethod
-    def make_histograms(cls, df, length, n_samples):
+    def make_histograms(cls, df, length, n_samples, ladder_window=10):
         histogram = np.zeros(length)
         histogram_start = np.zeros(length)
         histogram_stop = np.zeros(length)
         histogram_ac = np.zeros(length)
         histogram_am = np.zeros(length)
-        histogram_bonds = np.zeros(length - 1)
+        #  histogram_bonds = np.zeros(length - 1)
 
-        #  for upf_entry in upf_entries:
         for pep_var_id, peptide_series in df.peptidomics.iterrows():
             p = SequenceRange(pep_var_id.start, pep_var_id.stop)
             intensity = peptide_series.sum() / n_samples
@@ -303,10 +395,22 @@ class ProteinFeatureExtractor:
             histogram_start[p.start.index] += intensity
             histogram_stop[p.stop.index] += intensity
             histogram[p.slice] += intensity
-            histogram_bonds[p.slice.start:p.slice.stop - 1] += intensity
+
+        bonds = np.stack((histogram[1:], histogram[:-1]))
+        with np.errstate(invalid='ignore'):
+            histogram_bonds = bonds.min(axis=0) / bonds.max(axis=0)
 
         return (histogram, histogram_start, histogram_stop, histogram_ac, histogram_am,
                 histogram_bonds)
+
+    @classmethod
+    def get_bond_slice(cls, peptide):
+        """
+        A peptide like this SequenceRange(10, 20), has a length of 11, but only 10 bonds, thus
+        SequenceRange(10, 20).slice -> slice(9, 20)
+        cls.get_bodn_slice(SeuqenceRange(10, 20) -> slice(9, 19)
+        """
+        return SequenceRange(peptide.start, peptide.stop - 1).slice
 
     #  @classmethod
     def make_sample_frequency_histogram(self, df):
@@ -324,8 +428,74 @@ class ProteinFeatureExtractor:
     # valid/fair
     ########################################
     @classmethod
+    def get_clusters(cls, h_cluster):
+        clusters = {}
+        for n_clust in range(1, h_cluster.max() + 1):
+            cluster_indexes = np.where(h_cluster == n_clust)[0]
+            clusters[n_clust] = SequenceRange.from_index(
+                cluster_indexes[0], cluster_indexes[-1])
+        return clusters
+
+    @classmethod
+    def count_ladders_old(cls, positions, h_cluster, clusters, ladder_window=10):
+        # TODO: ladders should take into account the number of start stops, IE
+        # if 5 starts at the position and 10 peptides start 5 other places
+        # 5 / (5 + 10) = 1/3 <--- ideal
+        # 1 / (1 + 5) = 1/6  <--- how we do it now
+        counts = np.zeros(h_cluster.shape[0])
+        for position in positions:
+            counts[position.index] = 1
+        h_ladder = np.zeros(h_cluster.shape[0])
+
+        # ladders are pos +/- ladder_window, but has to stay within cluster boundaries
+        for position in positions:
+            n_cluster = h_cluster[position.index]
+            ladder_start = max(clusters[n_cluster].start, position.pos - ladder_window)
+            ladder_stop = min(clusters[n_cluster].stop, position.pos + ladder_window)
+            ladder_range = SequenceRange(ladder_start, ladder_stop)
+            h_ladder[position.index] = counts[ladder_range.slice].sum() - 1
+
+        return h_ladder
+
+    @classmethod
+    def count_ladders(cls, position_counts, h_cluster, clusters, ladder_window=10):
+        """
+        Returns the percentages of top +/- window_ladder around a possition_count
+
+        thus if there are 5 peptides that stops at position 100
+        and 10 peptides that stop within 10 of that position the that index of the returned array
+        would be: 5 / (10 + 5) = 0.3333..
+        thus close to 0 means loads of close starting positions, and 1 means only starting position
+        """
+        # TODO: ladders should take into account the number of start stops, IE
+        # if 5 starts at the position and 10 peptides start 5 other places
+
+        # 1 / (1 + 5) = 1/6  <--- how we do it in the code below
+        #  counts = np.zeros(h_cluster.shape[0])
+        #  for position in positions:
+        #      counts[position.index] = 1
+        #  h_ladder = np.zeros(h_cluster.shape[0])
+
+        # 5 / (5 + 10) = 1/3 <--- ideal
+        counts = np.zeros(h_cluster.shape[0])
+        for position, count in position_counts.items():
+            counts[position.index] = count
+        h_ladder = np.zeros(h_cluster.shape[0])
+
+        # ladders are pos +/- ladder_window, but has to stay within cluster boundaries
+        #  for position in positions.items():
+        for position, count in position_counts.items():
+            n_cluster = h_cluster[position.index]
+            ladder_start = max(clusters[n_cluster].start, position.pos - ladder_window)
+            ladder_stop = min(clusters[n_cluster].stop, position.pos + ladder_window)
+            ladder_range = SequenceRange(ladder_start, ladder_stop)
+            #  h_ladder[position.index] = counts[ladder_range.slice].sum() - 1
+            h_ladder[position.index] = count / counts[ladder_range.slice].sum()
+        return h_ladder
+
+    @classmethod
     def get_cluster_histogram(cls, no_aa):
-        cluster = np.zeros(no_aa.shape)
+        cluster = np.zeros(no_aa.shape, dtype=int)
         cluster_count = 0
         in_cluster = False
         for i, aa in enumerate(~no_aa):
@@ -379,17 +549,25 @@ class ProteinFeatureExtractor:
         #  for upf_entry in upf_entries:
         #      p = SequenceRange(upf_entry.start, upf_entry.end)
         for p in peptides:
-            valid_starts[p.start.pos] = h_cluster[p.start.index]
-            valid_stops[p.stop.pos] = h_cluster[p.stop.index]
+            valid_starts[p.start] = h_cluster[p.start.index]
+            valid_stops[p.stop] = h_cluster[p.stop.index]
         return valid_starts, valid_stops
 
+    def get_possition_counts(cls, peptides):
+        starts = collections.defaultdict(int)
+        stops = collections.defaultdict(int)
+        for p in peptides:
+            starts[p.start] += 1
+            stops[p.stop] += 1
+        return dict(starts), dict(stops)
+
     @classmethod
-    def get_valid_peptides(cls, valid_starts, valid_stops):
+    def get_valid_peptides(cls, valid_starts, valid_stops, protein_sequence):
         valid_peptides = {}
         for v_start, c_start in valid_starts.items():
             for v_stop, c_stop in valid_stops.items():
                 if v_start < v_stop and c_start == c_stop:
-                    p = SequenceRange(v_start, v_stop)
+                    p = SequenceRange(v_start, v_stop, full_sequence=protein_sequence)
                     valid_peptides[p] = c_start
         return valid_peptides
 
