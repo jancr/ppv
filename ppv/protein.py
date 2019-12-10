@@ -4,7 +4,7 @@ from typing import Collection
 import math
 import itertools
 import collections
-import typing
+#  import typing
 
 # 3rd party imports
 import numpy as np
@@ -27,18 +27,15 @@ class ProteinFeatureExtractor:
     This function holds all the matrices needed to create MS and Chemical features for peptides
     """
 
-    #  ms_impute = FeatureTuple(
-    #      "MS Imputation",
-    #      ["{}_{}" for pos in ("start", "stop") for delta in (
-    #                                       ("start", "stop", "penalty_start", "penalty_stop"))
-    ms_intensity_features = FeatureTuple("MS Intensity",
-                                         ("start", "stop", "penalty_start", "penalty_stop"))
+    ms_intensity_features = FeatureTuple(
+        "MS Intensity",
+        ("start", "stop", "penalty_start", "penalty_stop"))
+    ms_bool_features = FeatureTuple("MS Bool", ("first", "last"))
     ms_frequency_features = FeatureTuple(
         "MS Frequency",
         ("acetylation", "amidation", "start", "stop", "observed", "bond", "sample", "ladder",
          "protein_coverage", "cluster_coverage"))
     ms_count_features = FeatureTuple("MS Count", ("start", "stop"))
-    #  ms_count_features = FeatureTuple("MS Count", ("start", "stop", "ladder",))
     chemical_features = FeatureTuple(
         "Chemical",
         ("Charge", "ChargeDensity", "pI", "InstabilityInd", "Aromaticity",
@@ -49,9 +46,6 @@ class ProteinFeatureExtractor:
     def __init__(self, df_protein: pd.DataFrame,
                  protein_sequence: str,
                  dataset_median: float,
-                 #  n_samples: int,
-                 #  length: Optional[int] = None,
-                 #  protein_id: str,
                  known_peptides: Collection = frozenset()):
         if not isinstance(protein_sequence, str):
             raise AttributeError("protein_sequence must of type 'str'")
@@ -59,10 +53,6 @@ class ProteinFeatureExtractor:
         self.protein_sequence = protein_sequence
         self.log10_median = math.log10(dataset_median)
 
-        #  if not isinstance(n_samples, int):
-        #      raise ValueError("n_samples must be of type int")
-        #  self.n_samples = n_samples
-        #  self.protein_id = protein_id
         self.campaign_id, self.protein_id = df_protein.index[0][:2]
         self.n_samples = df_protein.shape[1]
         self.known_peptides = known_peptides
@@ -72,8 +62,8 @@ class ProteinFeatureExtractor:
                             if data.dropna().shape[0] != 0}
         self.df = df_protein
 
-        self.h, self.h_start, self.h_stop, self.h_ac, self.h_am, self.h_bond = \
-            self.make_histograms(self.df, self.length, self.n_samples)
+        (self.h, self.h_start, self.h_stop, self.h_ac, self.h_am, self.h_bond, self.h_first,
+            self.h_last) = self.make_histograms(self.df, self.length, self.n_samples)
         self.h_sample = self.make_sample_frequency_histogram(self.df)
 
         self.no_aa = self.h == 0
@@ -109,47 +99,35 @@ class ProteinFeatureExtractor:
         self.h_ladder_stop = self.count_ladders(self.stop_counts, self.h_cluster, self.clusters,
                                                 ladder_window=10)
 
-    def create_imputation_df(self, delta_imputations: typing.List[float]):
-        if delta_imputations.min() < 0:
-            raise ValueError("You cannot downshift by a negative number!")
-        imputation_values = []
-        for delta_imp in delta_imputations:
-            imputation_values.append(max(self.log10_median - delta_imp, 0))
+    #  def create_imputation_df(self, delta_imputations: typing.List[float]):
+    #      if delta_imputations.min() < 0:
+    #          raise ValueError("You cannot downshift by a negative number!")
+    #      imputation_values = []
+    #      for delta_imp in delta_imputations:
+    #          imputation_values.append(max(self.log10_median - delta_imp, 0))
+    #
+    #      # TODO one of thise:
+    #      # a) make start/stop into annotatons along with:
+    #      #    is_first / is_last (next to no_aa)
+    #      #    and add thise to "Annotations"
+    #      #    a1) make a function ala "impute(imp_val) that updates "start/stop"
+    #      # b) finish the above function, by factorizing helper methods out from the one below and
+    #      #    make "Imputation" feature such as start_1 start_1.5 start_2 etc
 
-        # TODO one of thise:
-        # a) make start/stop into annotatons along with:
-        #    is_first / is_last (next to no_aa)
-        #    and add thise to "Annotations"
-        #    a1) make a function ala "impute(imp_val) that updates "start/stop"
-        # b) finish the above function, by factorizing helper methods out from the one below and
-        #    make "Imputation" feature such as start_1 start_1.5 start_2 etc
-
-    def create_feature_df(self, delta_imp: int, peptides: str = 'valid'):
-        if delta_imp < 0:
-            raise ValueError("You cannot downshift by a negative number!")
+    def create_feature_df(self, peptides: str = 'valid'):
         ########################################
         # derived
         ########################################
-        # depends on w_imp_val
-        imp_val = max(self.log10_median - delta_imp, 0)
-        #  h10 = self.fake_log10(self.h, imp_val)
-        #  self.h_overlap = np.zeros(self.length)
+        self.start_scores, self.stop_scores = self.get_terminal_histograms(
+            self.h, self.h_start, self.h_stop)
 
-        #  h10_padded = np.ones(self.length + 2) * imp_val
-        #  h10_padded[1:-1] = h10
-
-        # depends on self.h10, which depends on imp_val
-        self.start_scores, self.stop_scores = self.get_scores(self.h, imp_val)
-
-        # get peptides and stabalize looping order, so we can use df.iloc
         peptides = sorted((p, c) for (p, c) in self.get_peptides_by_type(peptides).items())
-        #  peptides = list(sorted((p, c) for (p, c) in self.get_peptides_by_type(peptides)))
 
         # pre allocate df
-        #  annotations = ["known"]
         make_features = lambda t: zip(itertools.repeat(t.type), t.features)
-        feature_list = (self.ms_intensity_features, self.ms_frequency_features,
-                        self.ms_count_features, self.chemical_features, self.annotations)
+        feature_list = (
+            self.ms_intensity_features, self.ms_bool_features, self.ms_frequency_features,
+            self.ms_count_features, self.chemical_features, self.annotations)
         features = list(itertools.chain(*map(make_features, feature_list)))
         #  features += [["Annotations", "Known"]]
 
@@ -162,6 +140,8 @@ class ProteinFeatureExtractor:
         #  types['Target', 'known'] = bool
         for annotation_name, annotation_dtype in self.annotation_dtypes.items():
             types[self.annotations.type, annotation_name] = annotation_dtype
+        for ms_bool_feature in self.ms_bool_features.features:
+            types[self.ms_bool_features.type, ms_bool_feature] = bool
 
         df = pd.DataFrame(np.zeros((len(peptides), len(features))) * np.nan,
                           index=index, columns=columns).T
@@ -204,6 +184,10 @@ class ProteinFeatureExtractor:
             series[ms_int, 'penalty_stop'] = self.stop_scores[penalty.slice].sum()
         else:
             series[ms_int, 'penalty_start'] = series[ms_int, 'penalty_stop'] = 0
+
+        # MS Bool
+        series[self.ms_bool_features.type, "first"] = self.h_first[i_start]
+        series[self.ms_bool_features.type, "last"] = self.h_last[i_stop]
 
         # MS Frequency
         # ptm weights
@@ -295,27 +279,102 @@ class ProteinFeatureExtractor:
         h[not_zero] = histogram[not_zero] / bg_histogram[not_zero]
         return h
 
-    def fake_log10(self, data, imp_val=1):
-        "normalizes data to imp_val, default is 1 as this will make all 0 stay 0"
-        data = data.copy()
-        # if a peptide > imputation score, it would get a 'negative start score!!!'
-        data[data <= 10 ** imp_val] = 10 ** imp_val
-        return np.log10(data)
+    #  def fake_log10(self, data, imp_val=1):
+    #      "normalizes data to imp_val, default is 1 as this will make all 0 stay 0"
+    #      data = data.copy()
+    #      # if a peptide > imputation score, it would get a 'negative start score!!!'
+    #      data[data <= 10 ** imp_val] = 10 ** imp_val
+    #      return np.log10(data)
+    #
+    #  def get_scores(self, histogram, imp_val):
+    #      with np.errstate(divide='raise'):
+    #          h10 = self.fake_log10(histogram, imp_val)
+    #          #  self.h_overlap = np.zeros(self.length)
+    #
+    #          h10_padded = np.ones(self.length + 2) * imp_val
+    #          h10_padded[1:-1] = h10
+    #
+    #          start_scores = h10 - h10_padded[:-2]
+    #          start_scores[start_scores < 0] = 0
+    #
+    #          stop_scores = h10 - h10_padded[2:]
+    #          stop_scores[stop_scores < 0] = 0
+    #          return start_scores, stop_scores
 
-    def get_scores(self, histogram, imp_val):
-        with np.errstate(divide='raise'):
-            h10 = self.fake_log10(histogram, imp_val)
-            #  self.h_overlap = np.zeros(self.length)
+    def _pad_array(self, array):
+        padded = np.zeros(array.shape[0] + 2)
+        padded[1:-1] = array
+        return padded
 
-            h10_padded = np.ones(self.length + 2) * imp_val
-            h10_padded[1:-1] = h10
+    def get_terminal_histograms(self, histogram, histogram_start, histogram_stop):
+        """
+        intuition behind formular:
+        a start/stop point is good if it is higher than the previous/next possition
+        only count the "height" from peptides who are 'contenious', ie: subtract the height
+        contribution from peptides who start/stop before the start and after the stop
+        vissual aid:
 
-            start_scores = h10 - h10_padded[:-2]
-            start_scores[start_scores < 0] = 0
+        no overlap: peptide 2 start should not be penalized by peptide 1:
+                               i
+        peptide 1: ------------
+        peptide 2:             --------------
+        start    : -           -
+        stop     :            -             -
+        histogram: --------------------------
+        start_{i}= h_{i} - h_{i-1} + h_{stop,i-1}
+        start_{i}=     '-'     -    '-'  + '-'   = '-'  <-- good start place
+                               i
+        no overlap: peptide 2 start should be penalized by peptide 1:
+        peptide 1: ----------------
+        peptide 2:             --------------
+        histogram: ------------====----------
+        start    : -           -
+        stop     :                -         -
+        start_{i}= h_{i} - h_{i-1} + h_{stop,i-1}
+        start =        '-'     -   '-'   +    ' ' = ' '  <-- bad start place
 
-            stop_scores = h10 - h10_padded[2:]
-            stop_scores[stop_scores < 0] = 0
-            return start_scores, stop_scores
+        note: we add a pseudo counnt of 1 to all thise, as this makes log10(data) zero or positive.
+        returns 2 histograms: (log_{10}(start), log_{10}(stop))
+        """
+
+        histogram_padded = self._pad_array(histogram)
+        histogram_start_padded = self._pad_array(histogram_start)
+        histogram_stop_padded = self._pad_array(histogram_stop)
+
+        #  #  start_{i} =   h_{start,i}   -        h_{i-1}        +        h_{stop,i-1}        + 1
+        #  start_scores = histogram_start - histogram_padded[:-2] + histogram_stop_padded[:-2] + 1
+        #  start_scores[start_scores < 1] = 1
+        #  start_scores = np.log10(start_scores)
+        #  #  stop_{i} =    h_{stop,i}  -        h_{i+1}       +       h_{start,i+1}        + 1
+        #  stop_scores = histogram_stop - histogram_padded[2:] + histogram_start_padded[2:] + 1
+        #  stop_scores[stop_scores < 1] = 1
+        #  stop_scores = np.log10(stop_scores)
+
+        #  start_{i} =   h_{start,i}   -        h_{i-1}        +        h_{stop,i-1}        + 1
+        start_previous = np.log10(histogram_padded[:-2] - histogram_stop_padded[:-2] + 1)
+        delta_start = np.log10(histogram + 1) - start_previous
+        delta_start[delta_start < 0] = 0
+        #  stop_{i} =    h_{stop,i}  -        h_{i+1}       +       h_{start,i+1}        + 1
+        stop_subsequent = np.log10(histogram_padded[2:] - histogram_start_padded[2:] + 1)
+        delta_stop = np.log10(histogram + 1) - stop_subsequent
+        delta_stop[delta_stop < 0] = 0
+
+        #  # debug!!!
+        #  #  start_{i} =   h_{start,i}   -        h_{i-1}        +        h_{stop,i-1}        + 1
+        #  start_previous2 = np.log10(histogram_padded[:-2] + 1)
+        #  delta_start2 = np.log10(histogram + 1) - start_previous2
+        #  delta_start2[delta_start2 < 0] = 0
+        #  #  stop_{i} =    h_{stop,i}  -        h_{i+1}       +       h_{start,i+1}        + 1
+        #  stop_subsequent2 = np.log10(histogram_padded[2:] + 1)
+        #  delta_stop2 = np.log10(histogram + 1) - stop_subsequent2
+        #  delta_stop2[delta_stop2 < 0] = 0
+        #  if not all(delta_start == delta_start2):
+        #      import colored_traceback.auto; import ipdb; ipdb.set_trace()  # noqa
+        #  elif not all(delta_stop == delta_stop2):
+        #      import colored_traceback.auto; import ipdb; ipdb.set_trace()  # noqa
+        #  #  import colored_traceback.auto; import ipdb; ipdb.set_trace()  # noqa
+
+        return delta_start, delta_stop
 
     ########################################
     # Parameter maipulation
@@ -377,7 +436,7 @@ class ProteinFeatureExtractor:
         return still_violations
 
     @classmethod
-    def make_histograms(cls, df, length, n_samples, ladder_window=10):
+    def make_histograms(cls, df, length, n_samples, ladder_window=5):
         histogram = np.zeros(length)
         histogram_start = np.zeros(length)
         histogram_stop = np.zeros(length)
@@ -400,8 +459,11 @@ class ProteinFeatureExtractor:
         with np.errstate(invalid='ignore'):
             histogram_bonds = bonds.min(axis=0) / bonds.max(axis=0)
 
+        first = (histogram == histogram_start) & (histogram != 0)
+        last = (histogram == histogram_stop) & (histogram != 0)
+
         return (histogram, histogram_start, histogram_stop, histogram_ac, histogram_am,
-                histogram_bonds)
+                histogram_bonds, first, last)
 
     @classmethod
     def get_bond_slice(cls, peptide):
@@ -436,26 +498,26 @@ class ProteinFeatureExtractor:
                 cluster_indexes[0], cluster_indexes[-1])
         return clusters
 
-    @classmethod
-    def count_ladders_old(cls, positions, h_cluster, clusters, ladder_window=10):
-        # TODO: ladders should take into account the number of start stops, IE
-        # if 5 starts at the position and 10 peptides start 5 other places
-        # 5 / (5 + 10) = 1/3 <--- ideal
-        # 1 / (1 + 5) = 1/6  <--- how we do it now
-        counts = np.zeros(h_cluster.shape[0])
-        for position in positions:
-            counts[position.index] = 1
-        h_ladder = np.zeros(h_cluster.shape[0])
-
-        # ladders are pos +/- ladder_window, but has to stay within cluster boundaries
-        for position in positions:
-            n_cluster = h_cluster[position.index]
-            ladder_start = max(clusters[n_cluster].start, position.pos - ladder_window)
-            ladder_stop = min(clusters[n_cluster].stop, position.pos + ladder_window)
-            ladder_range = SequenceRange(ladder_start, ladder_stop)
-            h_ladder[position.index] = counts[ladder_range.slice].sum() - 1
-
-        return h_ladder
+    #  @classmethod
+    #  def count_ladders_old(cls, positions, h_cluster, clusters, ladder_window=10):
+    #      # TODO: ladders should take into account the number of start stops, IE
+    #      # if 5 starts at the position and 10 peptides start 5 other places
+    #      # 5 / (5 + 10) = 1/3 <--- ideal
+    #      # 1 / (1 + 5) = 1/6  <--- how we do it now
+    #      counts = np.zeros(h_cluster.shape[0])
+    #      for position in positions:
+    #          counts[position.index] = 1
+    #      h_ladder = np.zeros(h_cluster.shape[0])
+    #
+    #      # ladders are pos +/- ladder_window, but has to stay within cluster boundaries
+    #      for position in positions:
+    #          n_cluster = h_cluster[position.index]
+    #          ladder_start = max(clusters[n_cluster].start, position.pos - ladder_window)
+    #          ladder_stop = min(clusters[n_cluster].stop, position.pos + ladder_window)
+    #          ladder_range = SequenceRange(ladder_start, ladder_stop)
+    #          h_ladder[position.index] = counts[ladder_range.slice].sum() - 1
+    #
+    #      return h_ladder
 
     @classmethod
     def count_ladders(cls, position_counts, h_cluster, clusters, ladder_window=10):

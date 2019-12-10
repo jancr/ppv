@@ -16,15 +16,21 @@ import seaborn as sns
 import tqdm
 from peputils.proteome import fasta_to_protein_hash
 from sequtils import SequenceRange
-from sklearn.linear_model import LogisticRegression
+#  from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.externals import joblib
-from sklearn.pipeline import make_pipeline
+#  from sklearn.pipeline import make_pipeline
+import pymc3 as pm
 #  import matplotlib.patches as mpatches
 
 # local
 from .protein import ProteinFeatureExtractor
 from .split import XFold
+
+#  mpl.use('agg')
+plt.style.use('seaborn-white')
+color = '#87ceeb'
+f_dict = {'size': 16}
 
 
 def _validate(df):
@@ -86,7 +92,7 @@ class PandasPPV:
 
     def create_feature_df(self,
                           protein_sequences: typing.Union[str, typing.Dict[str, set]],
-                          delta_imp: int = 4,
+                          #  delta_imp: int = 4,
                           peptides: str = 'valid',
                           known: typing.Union[None, str, typing.Dict[str, set]] = None,
                           normalize: bool = False,
@@ -96,7 +102,7 @@ class PandasPPV:
         df = self.df
         if normalize:
             df = df.peptidomics.normalize()
-        median = np.nanmedian(df.values.flatten())
+        #  median = np.nanmedian(df.values.flatten())
 
         features = []
         futures = []
@@ -109,8 +115,8 @@ class PandasPPV:
                 if len(known_peptides) == 0 and peptides == 'fair':
                     continue
                 sequence = protein_sequences[protein_id]
-                pfe, df_potein = self._get_protein_features(df_protein, sequence, median,
-                                                            delta_imp, peptides, known_peptides)
+                pfe, df_potein = self._get_protein_features(df_protein, sequence,
+                                                            peptides, known_peptides)
                 features.append(df_protein)
         else:
             exe = concurrent.futures.ProcessPoolExecutor(n_cpus)
@@ -120,8 +126,8 @@ class PandasPPV:
                     progress_bar.update(1)
                     continue
                 sequence = protein_sequences[protein_id]
-                future = exe.submit(self._get_protein_features, df_protein, sequence, median,
-                                    delta_imp, peptides, known_peptides)
+                future = exe.submit(self._get_protein_features, df_protein, sequence,
+                                    peptides, known_peptides)
                 futures.append(future)
 
             for future in concurrent.futures.as_completed(futures):
@@ -136,10 +142,10 @@ class PandasPPV:
     def n_proteins(self):
         return len(self.df.index.get_level_values('protein_id').unique())
 
-    def _get_protein_features(self, df_protein, protein_sequence, median, delta_imp, peptides,
+    def _get_protein_features(self, df_protein, protein_sequence, peptides,
                               known_peptides):
-        pfe = ProteinFeatureExtractor(df_protein, protein_sequence, median, known_peptides)
-        return pfe, pfe.create_feature_df(delta_imp, peptides)
+        pfe = ProteinFeatureExtractor(df_protein, protein_sequence, known_peptides)
+        return pfe, pfe.create_feature_df(peptides)
 
 
 @pd.api.extensions.register_dataframe_accessor("ppv")
@@ -210,18 +216,26 @@ class PandasPPVFeatures:
             return self.df
         chem = self.df["Chemical"]
 
-        exp_columns = set(ProteinFeatureExtractor.chemical_features.features)
-        if exp_columns != set(chem.columns):
+        #  exp_columns = set(ProteinFeatureExtractor.chemical_features.features)
+        #  if exp_columns != set(chem.columns):
+        if "Net Charge" in chem:
             warnings.warn("Chemical seems to be already transformed")
             return self.df
 
         features_fixed = self.df.copy()
-        for bad_feature in ("Charge", "ChargeDensity", "pI"):
-            del features_fixed["Chemical", bad_feature]
-        features_fixed["Chemical", "Net Charge"] = self.df["Chemical", "Charge"].abs()
-        _cd = self.df["Chemical", "ChargeDensity"].abs()
-        features_fixed["Chemical", "Net ChargeDensity"] = _cd
-        features_fixed["Chemical", "abs(pI - 7)"] = (self.df["Chemical", "pI"] - 7).abs()
+        #  for bad_feature in ("Charge", "ChargeDensity", "pI"):
+        #      if bad_feature in features_fixed:
+        #          del features_fixed["Chemical", bad_feature]
+        if ("Chemical", "Charge") in self.df:
+            features_fixed["Chemical", "Net Charge"] = self.df["Chemical", "Charge"].abs()
+            del features_fixed["Chemical", "Charge"]
+        if ("Chemical", "ChargeDensity") in self.df:
+            _cd = self.df["Chemical", "ChargeDensity"].abs()
+            features_fixed["Chemical", "Net ChargeDensity"] = _cd
+            del features_fixed["Chemical", "ChargeDensity"]
+        if ("Chemical", "pI") in self.df:
+            features_fixed["Chemical", "abs(pI - 7)"] = (self.df["Chemical", "pI"] - 7).abs()
+            del features_fixed["Chemical", "pI"]
         #  features_fixed.pop("Annotations")
         return features_fixed
 
@@ -250,17 +264,18 @@ class PandasPPVFeatures:
         predictions = model.predict_proba(predictors)[:, 1]
         return pd.Series(predictions, index=self.df.index, name=("Annotations", "PPV"))
 
-    def create_model(self, path=None, *, random_state=0, max_iter=5000, **kwargs):
-        features_transformed = self._transform()
-
-        scaler = features_transformed.ppv._get_scaler()
-        logistic_model = LogisticRegression(random_state=random_state, max_iter=max_iter, **kwargs)
-        pipline = make_pipeline(scaler, logistic_model)
-
-        model = pipline.fit(features_transformed.ppv.predictors, self.target.astype(int))
-        if path:
-            joblib.dump(model, path)
-        return model
+    #  def create_model(self, path=None, *, random_state=0, max_iter=5000, **kwargs):
+    #      features_transformed = self._transform()
+    #
+    #      scaler = features_transformed.ppv._get_scaler()
+    #      logistic_model = LogisticRegression(random_state=random_state,
+    #                                          max_iter=max_iter, **kwargs)
+    #      pipline = make_pipeline(scaler, logistic_model)
+    #
+    #      model = pipline.fit(features_transformed.ppv.predictors, self.target.astype(int))
+    #      if path:
+    #          joblib.dump(model, path)
+    #      return model
 
     def transform_to_null_features(self):
         df = self.subset({})  # delete all features
@@ -305,6 +320,14 @@ class PandasPPVFeatures:
             df.drop(feature_type, inplace=True, axis=1)
         return df
 
+    def _predictor_canvas(self, axes_size=4, extra=0):
+        features = self.predictors.shape[-1] + extra
+        n_col = math.ceil(features ** 0.5)
+        n_row = math.ceil(features / n_col)
+        fig = plt.figure(figsize=(n_col * axes_size, n_row * axes_size))
+        axes = fig.subplots(n_row, n_col)
+        return fig, axes
+
     def create_histograms(self, axes_size=2):
         df = self.df.copy()
         #  if features is not None:
@@ -312,20 +335,33 @@ class PandasPPVFeatures:
         known = df.ppv.positives.ppv.predictors
         unknown = df.ppv.negatives.ppv.predictors
 
-        n_col = math.ceil(known.shape[-1] ** 0.5)
-        n_row = math.ceil(known.shape[-1] / n_col)
-        fig = plt.figure(figsize=(n_col * axes_size, n_row * axes_size))
-        axes = fig.subplots(n_row, n_col)
+        fig, axes = self._predictor_canvas(axes_size)
         for ax, feature in zip(axes.flatten(), df.ppv.predictors.columns):
             bins = np.linspace(df[feature].min(), df[feature].max(), 15)
-            #  green = ax.hist(known[feature], bins, density=True, alpha=0.5, color='g')
-            #  red = ax.hist(unknown[feature], bins, density=True, alpha=0.5, color='r')
             ax.hist(known[feature], bins, density=True, alpha=0.5, color='g')
             ax.hist(unknown[feature], bins, density=True, alpha=0.5, color='r')
             ax.set_title(' '.join(feature))
-            #  legends = [mpatches.Patch(color='g', label='known'),
-            #              mpatches.Patch(color='r', label='unknown')]
-        #  fig.legend((green, red), ("known", "unknown"), loc='upper right')
+        return fig
+
+    def plot_posterior(self, trace, meanx=None, scalex=None, save_path=None, axes_size=4):
+        if meanx is not None and scalex is not None:
+            beta0 = trace['zbeta0'] - np.sum(trace['zbetaj'] * meanx / scalex, axis=1)
+            betaj = (trace['zbetaj'] / scalex)
+        else:
+            beta0 = trace['zbeta0'] - np.sum(trace['zbetaj'], axis=1)
+            betaj = (trace['zbetaj'])
+
+        fig, axes = self._predictor_canvas(axes_size, 1)
+        pm.plot_posterior(beta0, point_estimate='mode', ax=axes[0, 0], color=color)
+        axes[0, 0].set_xlabel(r'$\beta_0$ (Intercept)', fontdict=f_dict)
+        axes[0, 0].set_title('', fontdict=f_dict)
+        columns = self.predictors.columns
+        for i, (ax, feature) in enumerate(zip(axes.flatten()[1:], columns)):
+            pm.plot_posterior(betaj[:, i], point_estimate='mode', ax=ax, color=color)
+            ax.set_title('', fontdict=f_dict)
+            ax.set_xlabel(r'$\beta_{{{}}}$ ({})'.format(i + 1, ' '.join(feature)), fontdict=f_dict)
+        if save_path is not None:
+            fig.savefig(save_path)
         return fig
 
     def plot_hist(self, path=None, class_balance=None, target=("Annotations", "Known")):
@@ -334,31 +370,6 @@ class PandasPPVFeatures:
         if isinstance(path, str):
             g.savefig(path)
         return g
-
-        raise NotImplementedError("TODO!!!")
-        #  known_selector = self.df[target]
-        #  positives = self.df[known_selector]
-        #  negatives = self.df[~known_selector]
-        #  if class_balance is not None:
-        #      n_negatives = self.df.shape[0] - positives.shape[0]
-        #      negatives = negatives.sample(frac=class_balance * positives.shape[0] / n_negatives)
-        #  data = pd.concat((positives, negatives))
-        #
-        #  g = sns.PairGrid(data.sample(frac=1), hue=target, hue_kws={"cmap": ["Greens", "Reds"]})
-        #  g = g.map_diag(plt.hist)
-        #  g = g.map_offdiag(plt.scatter)
-        #  if isinstance(path, str):
-        #      g.savefig(path)
-        #  return g
-
-    #  def train(self, predictors=("MS Intensity", "MS Frequency", "MS counts")):
-    #      # TODO: remember to split... try different models?
-    #      df = self.df.copy()
-    #      predictors = df[list(predictors)]
-    #      target = df.pop("Target").astype(int)["known"]
-    #
-    #      model = LogisticRegression(random_state=0, solver='lbfgs', multi_class='multinomial')
-    #      return model.fit(predictors, target)  # classifier
 
     def split(self, xfolds=5):
         raise NotImplementedError("TODO!!")
@@ -382,3 +393,46 @@ class PandasPPVFeatures:
 
         xfold = XFold(n_folds, dict(n_known_peptides), validation)
         return xfold
+
+    def _drop_weak_features(self):
+        df = self.df.copy()
+        weak_features = {
+            "MS Intensity": ("penalty_start", "penalty_stop"),
+            "MS Count": ("start", "stop"),
+            "MS Frequency": ("cluster_coverage", "ladder"),
+            "Chemical": ("AliphaticInd", "BomanInd", "eisenberg", "ChargeDensity", "pI")
+        }
+        for feature_type, features in weak_features.items():
+            for feature in features:
+                del df[feature_type, feature]
+        return df
+
+    def zscore_predictors(data):
+        # remember to transform first!
+        X = data.predictors
+        meanx = X.mean().values
+        scalex = X.std().values
+        zX = ((X - meanx) / scalex).values
+        return zX
+
+    def create_model(self, meanx, scalex, offset=None):
+        zX = ((self.predictors - meanx) / scalex).values
+        with pm.Model() as model:
+            zbeta0 = pm.Normal('zbeta0', mu=0, sd=2)
+            zbetaj = pm.Normal('zbetaj', mu=0, sd=2, shape=(zX.shape[1]))
+
+            p = pm.invlogit(zbeta0 + pm.math.dot(zbetaj, zX.T))
+            likelihood = pm.Bernoulli('likelihood', p, observed=self.target.values)  # noqa
+            #  pm.model_to_graphviz(model)
+        return model
+
+    #  def rescale_parameters(self,
+
+    @classmethod
+    def get_parameters(cls, trace, meanx, scalex):
+        beta0 = trace['zbeta0'] - np.sum(trace['zbetaj'] * meanx / scalex, axis=1)
+        betaj = (trace['zbetaj'] / scalex)
+        return (beta0.mean(), betaj.mean(axis=0))
+
+    #  def predict(self, intercept, parameters, offset):
+    #      df = self.df
