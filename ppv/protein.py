@@ -1,7 +1,7 @@
 # core imports
 import copy
 from typing import Collection
-import math
+#  import math
 import itertools
 import collections
 #  import typing
@@ -20,6 +20,7 @@ from sequtils import SequenceRange
 
 
 FeatureTuple = collections.namedtuple("FeatureTuple", ("type", "features"))
+FeatureTupleDTyped = collections.namedtuple("FeatureTupleDTyped", ("type", "features", "dtypes"))
 
 
 class ProteinFeatureExtractor:
@@ -30,7 +31,7 @@ class ProteinFeatureExtractor:
     ms_intensity_features = FeatureTuple(
         "MS Intensity",
         ("start", "stop", "penalty_start", "penalty_stop"))
-    ms_bool_features = FeatureTuple("MS Bool", ("first", "last"))
+    ms_bool_features = FeatureTuple("MS Bool", ("first", "last", "observed"))
     ms_frequency_features = FeatureTuple(
         "MS Frequency",
         ("acetylation", "amidation", "start", "stop", "observed", "bond", "sample", "ladder",
@@ -40,18 +41,20 @@ class ProteinFeatureExtractor:
         "Chemical",
         ("Charge", "ChargeDensity", "pI", "InstabilityInd", "Aromaticity",
          "AliphaticInd", "BomanInd", "HydrophRatio", "eisenberg"))
-    annotations = FeatureTuple("Annotations", ("Known", "Cluster", "Intensity", "Sequence"))
-    annotation_dtypes = {"Known": "category", "Cluster": int, "Intensity": float, "Sequence": str}
+    annotations = FeatureTupleDTyped(
+        "Annotations",
+        ("Known", "Cluster", "Intensity", "Sequence", "N Flanking", "C Flanking", "LPV"),
+        ("category", int, float, str, str, str, bool))
 
     def __init__(self, df_protein: pd.DataFrame,
                  protein_sequence: str,
-                 dataset_median: float,
+                 #  dataset_median: float,
                  known_peptides: Collection = frozenset()):
         if not isinstance(protein_sequence, str):
             raise AttributeError("protein_sequence must of type 'str'")
         self.length = len(protein_sequence)
         self.protein_sequence = protein_sequence
-        self.log10_median = math.log10(dataset_median)
+        #  self.log10_median = math.log10(dataset_median)
 
         self.campaign_id, self.protein_id = df_protein.index[0][:2]
         self.n_samples = df_protein.shape[1]
@@ -98,6 +101,8 @@ class ProteinFeatureExtractor:
                                                  ladder_window=10)
         self.h_ladder_stop = self.count_ladders(self.stop_counts, self.h_cluster, self.clusters,
                                                 ladder_window=10)
+        self.lpv_creator = LPVCreator(list(self.upf_entries.keys()), self.protein_sequence,
+                                      self.h_ac, self.h_am)
 
     #  def create_imputation_df(self, delta_imputations: typing.List[float]):
     #      if delta_imputations.min() < 0:
@@ -114,7 +119,7 @@ class ProteinFeatureExtractor:
     #      # b) finish the above function, by factorizing helper methods out from the one below and
     #      #    make "Imputation" feature such as start_1 start_1.5 start_2 etc
 
-    def create_feature_df(self, peptides: str = 'valid'):
+    def create_feature_df(self, peptides: str = 'valid', lpv_column=True):
         ########################################
         # derived
         ########################################
@@ -138,21 +143,27 @@ class ProteinFeatureExtractor:
         types = {c: float for c in columns}
         # Annotations have different types
         #  types['Target', 'known'] = bool
-        for annotation_name, annotation_dtype in self.annotation_dtypes.items():
+        #  for annotation_name, annotation_dtype in self.annotation_dtypes.items():
+        _iter = zip(self.annotations.features, self.annotations.dtypes)
+        for annotation_name, annotation_dtype in _iter:
             types[self.annotations.type, annotation_name] = annotation_dtype
         for ms_bool_feature in self.ms_bool_features.features:
             types[self.ms_bool_features.type, ms_bool_feature] = bool
 
         df = pd.DataFrame(np.zeros((len(peptides), len(features))) * np.nan,
                           index=index, columns=columns).T
+        lpvs = None
+        if lpv_column:
+            lpvs = self.lpv_creator.predict(2, True)
         for peptide, n_cluster in peptides:
             _index = (self.campaign_id, self.protein_id, peptide.start.pos, peptide.stop.pos)
-            peptide_series = self._add_features_to_peptide_series(peptide, df.index, n_cluster)
+            peptide_series = self._add_features_to_peptide_series(peptide, df.index, n_cluster,
+                                                                  lpvs)
             df[_index] = peptide_series
         return df.T.astype(types)
 
     # helper methods
-    def _add_features_to_peptide_series(self, peptide, index, n_cluster=-1):
+    def _add_features_to_peptide_series(self, peptide, index, n_cluster=-1, lpvs=None):
         # primary intensity weights d = delta, pd = penalty delta
         # TODO only d_start and d_stop depends on impval, pd_start and pd_stop does not because
         # they are always between a d_start and d_stop, and should thus be above imp_val!
@@ -169,6 +180,8 @@ class ProteinFeatureExtractor:
         # which is consistent with how we currently do the grid search (imp_val=4):
         #       d_start = 5 - max(0, 4) = 1
         #       d_start = 7 - max(5, 4) = 2
+        if lpvs is None:
+            lpvs = set()
         i_start = peptide.start.index
         i_stop = peptide.stop.index
 
@@ -186,8 +199,10 @@ class ProteinFeatureExtractor:
             series[ms_int, 'penalty_start'] = series[ms_int, 'penalty_stop'] = 0
 
         # MS Bool
+        b_obs, f_obs = self._calc_observed(peptide)
         series[self.ms_bool_features.type, "first"] = self.h_first[i_start]
         series[self.ms_bool_features.type, "last"] = self.h_last[i_stop]
+        series[self.ms_bool_features.type, "observed"] = b_obs
 
         # MS Frequency
         # ptm weights
@@ -198,7 +213,6 @@ class ProteinFeatureExtractor:
 
         series[ms_freq, 'start'] = self.h_start_freq[i_start]
         series[ms_freq, 'stop'] = self.h_stop_freq[i_stop]
-        f_obs = self._calc_f_observed(peptide)
         series[ms_freq, 'observed'] = f_obs
         series[ms_freq, 'sample'] = self.h_sample[peptide.slice].min()
         series[ms_freq, 'ladder'] = \
@@ -239,22 +253,42 @@ class ProteinFeatureExtractor:
         #  series[self.annotations.type, "Type"] = peptide in self.known_peptides
         series[self.annotations.type, "Cluster"] = n_cluster
         series[self.annotations.type, "Sequence"] = peptide.seq
+        series[self.annotations.type, "LPV"] = False  # TODO!
+
+        series[self.annotations.type, "N Flanking"] = \
+            self.get_nflanking_region(peptide.start, self.protein_sequence)
+        series[self.annotations.type, "C Flanking"] = \
+            self.get_cflanking_region(peptide.stop, self.protein_sequence)
+        series[self.annotations.type, "LPV"] = peptide in lpvs
         if f_obs != 0:
             _pep_index = (slice(None), slice(None), peptide.start.pos, peptide.stop.pos)
             series[self.annotations.type, "Intensity"] = self.df.loc[_pep_index, :].sum().sum()
         return series
 
-    def _calc_f_observed(self, peptide):
+    def get_nflanking_region(self, start, protein_sequence, size=4):
+        protein_padded = "_" * size + protein_sequence
+        return SequenceRange(start, length=size, full_sequence=protein_padded).seq
+
+    def get_cflanking_region(self, stop, protein_sequence, size=4):
+        protein_padded = protein_sequence + "_" * size
+        return SequenceRange(stop + 1, length=size, full_sequence=protein_padded).seq
+
+    def _calc_observed(self, peptide) -> (bool, float):
+        """
+        returns:
+            Is the peptide in the data (True/False)
+            fraction of histogram explained peptide (float between 0 and 1)
+        """
         if peptide not in self.upf_entries:
-            return 0
+            return False, 0
         obs_area = self.upf_entries[peptide] * peptide.length / self.n_samples
         h_area = self.h[peptide.slice].sum()
-        return obs_area / h_area
+        return True, obs_area / h_area
 
     def get_peptides_by_type(self, type_: str):
         peptide_types = {'valid': self.valid_peptides, 'fair': self.fair_peptides}
         if type_ not in peptide_types:
-            raise ValueError(f"{type_} not in {peptide_types.keys()}")
+            raise ValueError(f"{type_} not in {peptide_types.keys()}")  # noqa
         return peptide_types[type_]
 
     @classmethod
@@ -633,93 +667,82 @@ class ProteinFeatureExtractor:
                     valid_peptides[p] = c_start
         return valid_peptides
 
+
+#  def create_lpvs(upf_peptides, h_ac, h_am, min_overlap, ptm_flag):
+#      lpv_creator = LPVCreator(upf_peptides, h_ac, h_am)
+#      return lpv_creator.predict(min_overlap, ptm_flag)
+
+
+class LPVCreator:
+    """
+    the LPV (Longest Peptide Variant) algorithm
+    kelstrups algorithm can be simplified to the following steps
+    for a sorted list, the next peptide will always have the same or a higher pep_begin
+    the algorithm
+    Phase 1)
+            step 1) build a stack of sorted peptides, pop the first peptide off as a "lpv
+            scaffold"
+            step 2) pop off peptide, check if the peptide is within the lpv we are building
+    if true redo step 2
+    if false, calcuate the overlap
+        if the overlap is above 2, then extend, and goto 2)
+        otherwise use this peptide to start building the next lpv, goto step 2)
+    Phase 2)
+    for each build lpv, check if there are any start/ends have ptm's, if som do split the lpv
+    accordingly
+    """
+
+    def __init__(self, peptides, protein_sequence, h_ac, h_am):
+        self.peptides = peptides
+        self.protein_sequence = protein_sequence
+        self.h_ac = h_ac
+        self.h_am = h_am
+
     ########################################
     # kelstrup algorithm
     ########################################
-    def predict_lpvs(self, min_overlap=2, ptm_flag=True):
-        """
-        the LPV (Longest Peptide Variant) algorithm
-        kelstrups algorithm can be simplified to the following steps
-        for a sorted list, the next peptide will always have the same or a higher pep_begin
-        the algorithm
-        Phase 1)
-             step 1) build a stack of sorted peptides, pop the first peptide off as a "lpv
-             scaffold"
-             step 2) pop off peptide, check if the peptide is within the lpv we are building
-        if true redo step 2
-        if false, calcuate the overlap
-         if the overlap is above 2, then extend, and goto 2)
-         otherwise use this peptide to start building the next lpv, goto step 2)
-        Phase 2)
-        for each build lpv, check if there are any start/ends have ptm's, if som do split the lpv
-        accordingly
-        """
+    def predict(self, min_overlap=2, ptm_flag=True):
 
-        lpvs = self.build_lpv(min_overlap)
+        lpv_iter = self._iter_build_lpv(min_overlap)
         if not ptm_flag:
-            return [(lpv.start.pos, lpv.stop.pos) for lpv in lpvs]
+            return set(lpv_iter)
         else:
-            return self.split_ptm(lpvs)
+            return set(self._iter_split_ptm(lpv_iter))
 
-    #  def __init__(self, features, min_overlap=2, ptm_flag=True):
-    #      self.features = features
-    #      self.min_overlap = min_overlap
-    #      self.ptm_flag = ptm_flag
-
-    # todo: make into iterator
-    def _build_lpv(self, min_overlap):
+    def _iter_build_lpv(self, min_overlap):
         # phase 1)
-        peptides = []
-        for peptide in self.upf_entries:
-            #  peptides.append([upf_entry.start, upf_entry.end])
-            # TODO: use PeptideLocation instead of .start/stop.pos
-            peptides.append([peptide.start.pos, peptide.stop.pos])
-
-        # Phase 1)
-        peptides.sort(reverse=True)
-        predictions = []
-        lpv_start, lpv_stop = peptides.pop()
+        # sorted reverse, because you can only pop from the end
+        peptides = sorted(self.peptides, reverse=True)
+        if len(peptides) == 0:
+            return
+        lpv = peptides.pop()
         while len(peptides) != 0:
-            pep_start, pep_stop = peptides.pop()
+            pep = peptides.pop()
 
             # Step 1) you are inside the peptide - ignore/delete -
-            if lpv_start <= pep_start <= lpv_stop and lpv_start <= pep_stop < lpv_stop:
+            if pep in lpv:
                 continue
 
-            # Step 2) you are etending the peptide - extend -
-            overlap = lpv_stop - pep_start + 1
+            # Step 2) you are extending the peptide - extend -
+            overlap = lpv.stop - pep.start + 1
             if overlap >= min_overlap:
-                lpv_stop = pep_stop
+                lpv = SequenceRange(lpv.start, pep.stop, full_sequence=self.protein_sequence)
                 continue
 
             # no extension, no internal -> new lpv
-            predictions.append(SequenceRange(lpv_start, lpv_stop))
-            lpv_start = pep_start
-            lpv_stop = pep_stop
-        predictions.append(SequenceRange(lpv_start, lpv_stop))
-        return predictions
+            yield lpv
+            lpv = pep
+        yield lpv
 
-    def split_ptm(self, predictions):
+    def _iter_split_ptm(self, lpv_iter):
+        # warning this iter can return the same lpv twice (so convert to set!)
         # Phase 2)
-        all_predictions = []
-        for lpv in predictions:
-            #  all_predictions.append((lpv.start.pos, lpv.stop.pos))
-            ac = self.h_ac[lpv.slice]
-            starts = {lpv.start.pos}
-            if ac.sum() != 0:
-                # this should be vectorized :D
-                for pep_start, intensity in enumerate(ac, lpv.start.pos):
-                    if intensity != 0:
-                        starts.add(pep_start)
-
-            am = self.h_am[lpv.slice]
-            stops = {lpv.stop.pos}
-            if am.sum() != 0:
-                # this should be vectorized :D
-                for pep_stop, intensity in zip(range(lpv.stop.pos, 0, -1), am[::-1]):
-                    if intensity != 0:
-                        stops.add(pep_stop)
-            for s in starts:
-                for e in stops:
-                    all_predictions.append(SequenceRange(s, e))
-        return all_predictions
+        for lpv in lpv_iter:
+            pos_array = np.arange(len(lpv)) + lpv.start.pos
+            starts = set(pos_array[self.h_ac[lpv.slice] != 0]) | {lpv.start.pos}
+            stops = set(pos_array[self.h_am[lpv.slice] != 0]) | {lpv.stop.pos}
+            for start in starts:
+                yield SequenceRange(start, lpv.stop, full_sequence=self.protein_sequence)
+            for stop in stops:
+                yield SequenceRange(lpv.start, stop, full_sequence=self.protein_sequence)
+            yield lpv

@@ -4,7 +4,7 @@ import concurrent.futures
 import collections
 import typing
 from collections import abc
-import pickle
+#  import pickle
 import math
 import warnings
 
@@ -17,20 +17,20 @@ import tqdm
 from peputils.proteome import fasta_to_protein_hash
 from sequtils import SequenceRange
 #  from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.externals import joblib
+#  from sklearn.preprocessing import StandardScaler
+#  from sklearn.externals import joblib
 #  from sklearn.pipeline import make_pipeline
-import pymc3 as pm
+#  import pymc3 as pm
 #  import matplotlib.patches as mpatches
 
 # local
 from .protein import ProteinFeatureExtractor
 from .split import XFold
+from .model import PPVModel
 
 #  mpl.use('agg')
-plt.style.use('seaborn-white')
-color = '#87ceeb'
-f_dict = {'size': 16}
+#  Grå: R230, G231, B231
+#  Blå: R81, G96, B171
 
 
 def _validate(df):
@@ -179,6 +179,8 @@ class PandasPPVFeatures:
     #  @property
     #  def annotations(self):
     #      return self.df["Annotations"]
+    def get_prior(self):
+        return self.target.astype(bool).sum() / self.target.shape[0]
 
     @classmethod
     def _seq_to_modseq(cls, row):
@@ -196,13 +198,13 @@ class PandasPPVFeatures:
         df["origin"] = "collapsed"
         return df.set_index("mod_seq", append=True).set_index("origin", append=True)
 
-    @classmethod
-    def load_model(cls, path):
-        clf, scaler = pickle.loads(open(path, 'rb'))
+    #  @classmethod
+    #  def load_model(cls, path):
+    #      clf, scaler = pickle.loads(open(path, 'rb'))
 
-    @classmethod
-    def save_model(clf, scaler, path="pickle/model.pickle"):
-        pickle.dump((clf, scaler), open(path, "wb"))
+    #  @classmethod
+    #  def save_model(clf, scaler, path="pickle/model.pickle"):
+    #      pickle.dump((clf, scaler), open(path, "wb"))
 
     def _transform(self):
         """
@@ -214,55 +216,65 @@ class PandasPPVFeatures:
         if "Chemical" not in self.df:
             warnings.warn("Chemical is not in the index...")
             return self.df
-        chem = self.df["Chemical"]
 
-        #  exp_columns = set(ProteinFeatureExtractor.chemical_features.features)
-        #  if exp_columns != set(chem.columns):
-        if "Net Charge" in chem:
+        df_transformed = self.df.rename(columns={"Charge": "Net Charge",
+                                                 "ChargeDensity": "Net ChargeDensity",
+                                                 "pI": "abs(pI - 7)"})
+
+        chem = self.df["Chemical"]
+        if all(chem.columns == df_transformed["Chemical"].columns):
             warnings.warn("Chemical seems to be already transformed")
             return self.df
 
-        features_fixed = self.df.copy()
-        #  for bad_feature in ("Charge", "ChargeDensity", "pI"):
-        #      if bad_feature in features_fixed:
-        #          del features_fixed["Chemical", bad_feature]
-        if ("Chemical", "Charge") in self.df:
-            features_fixed["Chemical", "Net Charge"] = self.df["Chemical", "Charge"].abs()
-            del features_fixed["Chemical", "Charge"]
-        if ("Chemical", "ChargeDensity") in self.df:
-            _cd = self.df["Chemical", "ChargeDensity"].abs()
-            features_fixed["Chemical", "Net ChargeDensity"] = _cd
-            del features_fixed["Chemical", "ChargeDensity"]
-        if ("Chemical", "pI") in self.df:
-            features_fixed["Chemical", "abs(pI - 7)"] = (self.df["Chemical", "pI"] - 7).abs()
-            del features_fixed["Chemical", "pI"]
-        #  features_fixed.pop("Annotations")
-        return features_fixed
+        if "Charge" in chem:
+            df_transformed["Chemical", "Net Charge"] = chem["Charge"].abs()
+        if "ChargeDensity" in chem:
+            df_transformed["Chemical", "Net ChargeDensity"] = chem["ChargeDensity"].abs()
+        if "pI" in chem:
+            df_transformed["Chemical", "abs(pI - 7)"] = (chem["pI"] - 7).abs()
+        return df_transformed
 
-    def _get_scaler(self):
-        return StandardScaler().fit(self.predictors)
+        #  features_fixed = self.df.copy()
+        #  #  for bad_feature in ("Charge", "ChargeDensity", "pI"):
+        #  #      if bad_feature in features_fixed:
+        #  #          del features_fixed["Chemical", bad_feature]
+        #  if ("Chemical", "Charge") in self.df:
+        #      features_fixed["Chemical", "Net Charge"] = self.df["Chemical", "Charge"].abs()
+        #      del features_fixed["Chemical", "Charge"]
+        #  if ("Chemical", "ChargeDensity") in self.df:
+        #      _cd = self.df["Chemical", "ChargeDensity"].abs()
+        #      features_fixed["Chemical", "Net ChargeDensity"] = _cd
+        #      del features_fixed["Chemical", "ChargeDensity"]
+        #  if ("Chemical", "pI") in self.df:
+        #      features_fixed["Chemical", "abs(pI - 7)"] = (self.df["Chemical", "pI"] - 7).abs()
+        #      del features_fixed["Chemical", "pI"]
+        #  #  features_fixed.pop("Annotations")
+        #  return features_fixed
 
-    def _scale_predictors(self, scaler=None):
-        if scaler is None:
-            scaler = self.get_scaler()
-        predictors = self.predictors
-        predictors_scaled = pd.DataFrame(scaler.transform(predictors), index=predictors.index,
-                                         columns=predictors.columns)
-        for name, series in self.df["Annotations"].iteritems():
-            predictors_scaled["Annotations", name] = series
-        return predictors_scaled
+    #  def _get_scaler(self):
+    #      return StandardScaler().fit(self.predictors)
+    #
+    #  def _scale_predictors(self, scaler=None):
+    #      if scaler is None:
+    #          scaler = self.get_scaler()
+    #      predictors = self.predictors
+    #      predictors_scaled = pd.DataFrame(scaler.transform(predictors), index=predictors.index,
+    #                                       columns=predictors.columns)
+    #      for name, series in self.df["Annotations"].iteritems():
+    #          predictors_scaled["Annotations", name] = series
+    #      return predictors_scaled
 
     #  def _train(self, **kwargs):
     #      model = LogisticRegression(random_state=0, max_iter=5000, **kwargs)
     #      return model.fit(self.predictors, self.target.astype(int))
 
-    def predict(self, model):
-        predictors = self._transform().ppv.predictors
-
-        if isinstance(model, str):
-            model = joblib.load(model)
-        predictions = model.predict_proba(predictors)[:, 1]
-        return pd.Series(predictions, index=self.df.index, name=("Annotations", "PPV"))
+    #  def predict(self, model):
+    #      predictors = self._transform().ppv.predictors
+    #
+    #      if isinstance(model, str):
+    #          model = joblib.load(model)
+    #      predictions = model.predict_proba(predictors)[:, 1]
+    #      return pd.Series(predictions, index=self.df.index, name=("Annotations", "PPV"))
 
     #  def create_model(self, path=None, *, random_state=0, max_iter=5000, **kwargs):
     #      features_transformed = self._transform()
@@ -278,8 +290,9 @@ class PandasPPVFeatures:
     #      return model
 
     def transform_to_null_features(self):
-        df = self.subset({})  # delete all features
-        df["Null", "Intensity"] = df["Annotations", "Intensity"]
+        # drop all features and select only observed
+        df = self.subset({})[self.df["MS Bool", "observed"]]
+        df["Null", "Log10(Intensity)"] = np.log10(df["Annotations", "Intensity"])
         return df
 
     def _class_balance(self, target, class_balance):
@@ -328,14 +341,15 @@ class PandasPPVFeatures:
         axes = fig.subplots(n_row, n_col)
         return fig, axes
 
-    def create_histograms(self, axes_size=2):
+    def create_histograms(self, axes_size=2, shape=None):
         df = self.df.copy()
         #  if features is not None:
         #      df = df[list(features) + "Annotations"]
         known = df.ppv.positives.ppv.predictors
         unknown = df.ppv.negatives.ppv.predictors
 
-        fig, axes = self._predictor_canvas(axes_size)
+        #  fig, axes = self._predictor_canvas(axes_size)
+        fig, axes = PPVModel._predictor_canvas(self.predictors, axes_size, shape=shape)
         for ax, feature in zip(axes.flatten(), df.ppv.predictors.columns):
             bins = np.linspace(df[feature].min(), df[feature].max(), 15)
             ax.hist(known[feature], bins, density=True, alpha=0.5, color='g')
@@ -343,26 +357,27 @@ class PandasPPVFeatures:
             ax.set_title(' '.join(feature))
         return fig
 
-    def plot_posterior(self, trace, meanx=None, scalex=None, save_path=None, axes_size=4):
-        if meanx is not None and scalex is not None:
-            beta0 = trace['zbeta0'] - np.sum(trace['zbetaj'] * meanx / scalex, axis=1)
-            betaj = (trace['zbetaj'] / scalex)
-        else:
-            beta0 = trace['zbeta0'] - np.sum(trace['zbetaj'], axis=1)
-            betaj = (trace['zbetaj'])
-
-        fig, axes = self._predictor_canvas(axes_size, 1)
-        pm.plot_posterior(beta0, point_estimate='mode', ax=axes[0, 0], color=color)
-        axes[0, 0].set_xlabel(r'$\beta_0$ (Intercept)', fontdict=f_dict)
-        axes[0, 0].set_title('', fontdict=f_dict)
-        columns = self.predictors.columns
-        for i, (ax, feature) in enumerate(zip(axes.flatten()[1:], columns)):
-            pm.plot_posterior(betaj[:, i], point_estimate='mode', ax=ax, color=color)
-            ax.set_title('', fontdict=f_dict)
-            ax.set_xlabel(r'$\beta_{{{}}}$ ({})'.format(i + 1, ' '.join(feature)), fontdict=f_dict)
-        if save_path is not None:
-            fig.savefig(save_path)
-        return fig
+    #  def plot_posterior(self, trace, meanx=None, scalex=None, save_path=None, axes_size=4):
+    #      if meanx is not None and scalex is not None:
+    #          beta0 = trace['zbeta0'] - np.sum(trace['zbetaj'] * meanx / scalex, axis=1)
+    #          betaj = (trace['zbetaj'] / scalex)
+    #      else:
+    #          beta0 = trace['zbeta0'] - np.sum(trace['zbetaj'], axis=1)
+    #          betaj = (trace['zbetaj'])
+    #
+    #      fig, axes = self._predictor_canvas(axes_size, 1)
+    #      pm.plot_posterior(beta0, point_estimate='mode', ax=axes[0, 0], color=color)
+    #      axes[0, 0].set_xlabel(r'$\beta_0$ (Intercept)', fontdict=f_dict)
+    #      axes[0, 0].set_title('', fontdict=f_dict)
+    #      columns = self.predictors.columns
+    #      for i, (ax, feature) in enumerate(zip(axes.flatten()[1:], columns)):
+    #          pm.plot_posterior(betaj[:, i], point_estimate='mode', ax=ax, color=color)
+    #          ax.set_title('', fontdict=f_dict)
+    #          ax.set_xlabel(r'$\beta_{{{}}}$ ({})'.format(i + 1, ' '.join(feature)),
+    #                        fontdict=f_dict)
+    #      if save_path is not None:
+    #          fig.savefig(save_path)
+    #      return fig
 
     def plot_hist(self, path=None, class_balance=None, target=("Annotations", "Known")):
         data = self._class_balance(target, class_balance)
@@ -407,32 +422,21 @@ class PandasPPVFeatures:
                 del df[feature_type, feature]
         return df
 
-    def zscore_predictors(data):
-        # remember to transform first!
-        X = data.predictors
-        meanx = X.mean().values
-        scalex = X.std().values
-        zX = ((X - meanx) / scalex).values
-        return zX
+    def transform_to_core_features(self):
+        core_labels = [("MS Intensity", "start"), ("MS Intensity", "stop"),
+                       ("MS Bool", "first"), ("MS Bool", "last")]
+        annotation_labels = [("Annotations", c) for c in self.df["Annotations"].columns]
+        return self.df.filter(items=core_labels + annotation_labels)
 
-    def create_model(self, meanx, scalex, offset=None):
-        zX = ((self.predictors - meanx) / scalex).values
-        with pm.Model() as model:
-            zbeta0 = pm.Normal('zbeta0', mu=0, sd=2)
-            zbetaj = pm.Normal('zbetaj', mu=0, sd=2, shape=(zX.shape[1]))
-
-            p = pm.invlogit(zbeta0 + pm.math.dot(zbetaj, zX.T))
-            likelihood = pm.Bernoulli('likelihood', p, observed=self.target.values)  # noqa
-            #  pm.model_to_graphviz(model)
-        return model
+    #  def zscore_predictors(data):
+    #      # remember to transform first!
+    #      X = data.predictors
+    #      meanx = X.mean().values
+    #      scalex = X.std().values
+    #      zX = ((X - meanx) / scalex).values
+    #      return zX
 
     #  def rescale_parameters(self,
-
-    @classmethod
-    def get_parameters(cls, trace, meanx, scalex):
-        beta0 = trace['zbeta0'] - np.sum(trace['zbetaj'] * meanx / scalex, axis=1)
-        betaj = (trace['zbetaj'] / scalex)
-        return (beta0.mean(), betaj.mean(axis=0))
 
     #  def predict(self, intercept, parameters, offset):
     #      df = self.df
