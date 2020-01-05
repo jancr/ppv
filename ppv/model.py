@@ -111,11 +111,11 @@ class PPVModel:
             ax.axis('off')
         return fig, axes.reshape(n_row, n_col)
 
-    def plot_posterior(self, save_path=None, axes_size=4):
-        self._plot_posterior(self.beta0, self.betaj, save_path, axes_size)
+    def plot_posterior(self, save_path=None, axes_size=4, shape=None):
+        self._plot_posterior(self.beta0, self.betaj, save_path, axes_size, shape)
 
-    def plot_zposterior(self, save_path=None, axes_size=4):
-        self._plot_posterior(self.zbeta0, self.zbetaj, save_path, axes_size)
+    def plot_zposterior(self, save_path=None, axes_size=4, shape=None):
+        self._plot_posterior(self.zbeta0, self.zbetaj, save_path, axes_size, shape)
 
     def _plot_posterior(self, beta0, betaj, save_path=None, axes_size=4, shape=None):
         fig, axes = self._predictor_canvas(self.predictors, axes_size, 1, shape=shape)
