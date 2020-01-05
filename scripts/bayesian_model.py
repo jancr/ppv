@@ -94,13 +94,14 @@ def parse_args():
                         default=False)
     parser.add_argument("--core", help="Only keep Intensity/Bool start/stop", action="store_true",
                         default=False)
+    #  parser.add_argument("--metropolis", default=False, action='store_true')
     parser.add_argument("--mini-batch", help="Use  batches to speed up", type=int,
                         default=0)
     # TODO: make plots with and without observed feature!!
     return parser.parse_args()
 
 
-if __name__ == '__main__':
+if __name__ == '__main__':  # noqa
     args = parse_args()
     base_name = ""
     if args.paper:
@@ -126,7 +127,6 @@ if __name__ == '__main__':
     # reduce stuff
     down_sample = args.s
     true_prior = data.ppv.get_prior()  # calcuate true prior before down sampling!
-    print(true_prior)
     if args.s is not None:
         base_name += '_{}'.format(args.s)
         positives = data.ppv.positives
@@ -146,6 +146,10 @@ if __name__ == '__main__':
             base_name += "mini_batch_{}".format(args.mini_batch)
         ppv_model = PPVModel(data, mini_batch=args.mini_batch)
         with ppv_model.model:
+            #  if args.metropolis:
+            #      base_name += "_metropolis"
+            #      trace = pm.sample(args.draw, step=pm.HamiltonianMC(), cores=8, chains=8)
+            #  else:
             trace = pm.sample(args.draw, cores=8, chains=8, max_treedepth=15, target_accept=0.90)
         ppv_model.add_trace(trace, true_prior=true_prior)
         ppv_model.save("pickle/model_{}.ppvmodel".format(base_name))

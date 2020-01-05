@@ -49,12 +49,7 @@ class PPVModel:
             zbeta0 = pm.Normal('zbeta0', mu=0, sd=2)
             zbetaj = pm.Normal('zbetaj', mu=0, sd=2, shape=shape[1])
 
-            #  p = pm.invlogit(zbeta0 + pm.math.dot(zbetaj, zX.T))
             p = pm.invlogit(zbeta0 + pm.math.dot(zX, zbetaj))
-            #  import colored_traceback.auto; import ipdb; ipdb.set_trace()  # noqa
-            #  likelihood = pm.Bernoulli('likelihood', p, observed=self.target.values,  # noqa
-            #  likelihood = pm.Bernoulli('likelihood', p, observed=y,  # noqa
-            #                            total_size=shape)
             likelihood = pm.Bernoulli('likelihood', p, observed=y, total_size=shape[0])  # noqa
             #  pm.model_to_graphviz(model)
         return model
@@ -134,7 +129,6 @@ class PPVModel:
             ax.set_title('', fontdict=f_dict)
             ax.set_xlabel(r'$\beta_{{{}}}$ ({})'.format(i + 1, ' '.join(feature)),
                           fontdict=f_dict)
-        # TODO: make all the rest of the figures blank
         if save_path is not None:
             fig.savefig(save_path)
         return fig
