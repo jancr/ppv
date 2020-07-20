@@ -92,11 +92,19 @@ def parse_args():
     parser.add_argument("--paper", help="Exclude Big Brain", action="store_true", default=False)
     parser.add_argument("--null", help="Predict based on intensity only", action="store_true",
                         default=False)
+    parser.add_argument("--grey-list", help="Remove negatives with KR during training",
+                        action="store_true", default=False)
+    parser.add_argument("--ms", help="Only keep MS features", action="store_true", default=False)
+    parser.add_argument("--chemical", help="Only keep Chemical features", action="store_true",
+                        default=False)
+    parser.add_argument("--no-transform", help="Do not transform chemical featurs",
+                        action="store_true", default=False)
     parser.add_argument("--core", help="Only keep Intensity/Bool start/stop", action="store_true",
                         default=False)
     #  parser.add_argument("--metropolis", default=False, action='store_true')
     parser.add_argument("--mini-batch", help="Use  batches to speed up", type=int,
                         default=0)
+    parser.add_argument('--traceplot', default=False, action='store_true')
     # TODO: make plots with and without observed feature!!
     return parser.parse_args()
 
@@ -110,19 +118,42 @@ if __name__ == '__main__':  # noqa
     else:
         df = pickle.load(open("pickle/mouse_features.pickle", 'rb'))
 
-    if args.null:
-        data = df.ppv.transform_to_null_features()
-        base_name += "null_data"
-    elif args.core:
-        data = df.ppv.transform_to_core_features()
-        base_name += "core_data"
-    elif args.build:
+    # data upsampling/down
+    if args.build:
         data = df
         base_name += "ppv_data"
     else:
-        data = df[df["MS Bool", "observed"]]
-        del data["MS Bool", "observed"]
+        data = df.ppv.observed
+        #  data = df[df["MS Bool", "observed"]]
+        #  del data["MS Bool", "observed"]
         base_name += "obs_data"
+
+    # feature engenering
+    if args.no_transform:
+        base_name += '_no_transform'
+    else:
+        data = data.ppv._transform()
+
+    # (sub)feature selection
+    if args.null:
+        data = data.ppv.transform_to_null_features()
+        base_name += "_null_model"
+    elif args.core:
+        data = data.ppv.transform_to_core_features()
+        base_name += "_core_model"
+    elif args.ms:
+        data = data.ppv.drop("Chemical")
+        base_name += "_ms_model"
+    elif args.chemical:
+        data = data.ppv.subset({'Chemical'})
+        base_name += "_chem_model"
+    else:
+        base_name += "_full_model"
+
+    # feature selection
+    if args.drop_weak_features:
+        base_name += '_strong'
+        data = data.ppv._drop_weak_features()
 
     # reduce stuff
     down_sample = args.s
@@ -134,25 +165,28 @@ if __name__ == '__main__':  # noqa
         negative_samples = down_sample * positives.shape[0]
         data = pd.concat((positives, negatives.sample(negative_samples)))
 
-    if args.drop_weak_features:
-        base_name += '_strong'
-        data = data.ppv._drop_weak_features()
-    data = data.ppv._transform()
-
     if args.load:
         ppv_model = PPVModel.load("pickle/model_{}.ppvmodel".format(base_name))
     else:
-        if args.mini_batch > 0:
-            base_name += "mini_batch_{}".format(args.mini_batch)
+        #  if args.mini_batch > 0:
+        #      base_name += "mini_batch_{}".format(args.mini_batch)
         ppv_model = PPVModel(data, mini_batch=args.mini_batch)
         with ppv_model.model:
             #  if args.metropolis:
             #      base_name += "_metropolis"
             #      trace = pm.sample(args.draw, step=pm.HamiltonianMC(), cores=8, chains=8)
             #  else:
-            trace = pm.sample(args.draw, cores=8, chains=8, max_treedepth=15, target_accept=0.90)
+            trace = pm.sample(args.draw, cores=8, chains=8, target_accept=0.9)
+            #  trace = pm.sample(args.draw, cores=8, chains=8,
+            #                    max_treedepth=15, target_accept=0.90
+            #                    step=[ppv_model.nuts, ppv_model.metropolis])
         ppv_model.add_trace(trace, true_prior=true_prior)
         ppv_model.save("pickle/model_{}.ppvmodel".format(base_name))
+
+    if args.traceplot:
+        ax = pm.plots.traceplot(ppv_model.trace)
+        fig = plt.gcf()
+        fig.savefig('figures/traceplots/{}.pdf'.format(base_name))
 
     # posteori
     ppv_model.plot_posterior("figures/posterior_{}.pdf".format(base_name))

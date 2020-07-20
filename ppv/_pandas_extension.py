@@ -32,6 +32,14 @@ from .model import PPVModel
 #  Grå: R230, G231, B231
 #  Blå: R81, G96, B171
 
+#  class KnownPeptide:
+#      def __init__(self, start, stop, *args, *, type="peptide", **kwargs):
+#          self.type = type
+#          self.sr = SequenceRange(start, stop, *args, **kwargs)
+#
+#      def __getattribute__(self, name):
+#          return self.sr.__getattribute__(self.sr, name)
+
 
 def _validate(df):
     if not isinstance(df, pd.DataFrame):
@@ -148,8 +156,50 @@ class PandasPPV:
         return pfe, pfe.create_feature_df(peptides)
 
 
+@pd.api.extensions.register_series_accessor("ppv")
+class PandasSeriesPPVFeatures:
+    def __init__(self, series):
+        self.series = series
+
+    def diversify_score(self, dampening=2.0):
+        """
+        This method modifies a series of scores (usally ppv prediction) and tries to make a
+        tradeoff between high predictions and high similarity to previous
+        predictions, the algorithm to achive this is very simple:
+        1) take the highest score
+        2) downvote all who share amino acids with it by a factor of 'dampening'
+        3) goto 1
+        """
+        # create overlap[campaign][proteinid] = {SequenceRange(..)..}
+        # so we can quickley find overlapping peptides
+        peptides = collections.defaultdict(lambda: collections.defaultdict(set))
+        for campaign_id, entry_id, score in self.series.peputils.iteritems(keep_campaign_id=True):
+            sequence_range = SequenceRange(entry_id.start, entry_id.stop)
+            peptides[campaign_id][entry_id.protein_id].add(sequence_range)
+
+        # the algorithm
+        scores = self.series.copy()
+        new_score = pd.Series(index=self.series.index)
+        while scores.shape[0] != 0:
+            # add best score to new_score
+            best_id = scores.idxmax()
+            new_score[best_id] = scores[best_id]
+            # penaltize overlapping peptides
+            overlapping_ids = self._get_overlaping_ids(*best_id, peptides)
+            scores[overlapping_ids] /= dampening
+            del scores[best_id]
+        return new_score
+
+    def _get_overlaping_ids(campaign_id, protein_id, start, stop, overlap):
+        peptides = overlap[campaign_id][protein_id]
+        best_peptide = SequenceRange(start, stop)
+        return [(campaign_id, protein_id, peptide.start.pos, peptide.stop.pos)
+                for peptide in peptides
+                if peptide.contains(best_peptide, part=any)]
+
+
 @pd.api.extensions.register_dataframe_accessor("ppv")
-class PandasPPVFeatures:
+class PandasDataFramePPVFeatures:
     """
     This object manipulates a DataFrame containing ppv feature object
     """
@@ -176,9 +226,12 @@ class PandasPPVFeatures:
     def target(self):
         return self.df["Annotations", "Known"]
 
-    #  @property
-    #  def annotations(self):
-    #      return self.df["Annotations"]
+    @property
+    def observed(self):
+        df = self.df[self.df["MS Bool", "observed"]].copy()
+        del df["MS Bool", "observed"]
+        return df
+
     def get_prior(self):
         return self.target.astype(bool).sum() / self.target.shape[0]
 
@@ -410,17 +463,36 @@ class PandasPPVFeatures:
         return xfold
 
     def _drop_weak_features(self):
+        pi = ["pI", "abs(pI - 7)"]  # not credible when including MS features
+        charge_density = ["ChargeDensity", "Net ChargeDensity"]
+        base_weak_chemical = \
+            ["AliphaticInd", "BomanInd", "eisenberg", "HydrophRatio"] + charge_density
+
         df = self.df.copy()
-        weak_features = {
-            "MS Intensity": ("penalty_start", "penalty_stop"),
-            "MS Count": ("start", "stop"),
-            "MS Frequency": ("cluster_coverage", "ladder"),
-            "Chemical": ("AliphaticInd", "BomanInd", "eisenberg", "ChargeDensity", "pI")
-        }
+        feature_categories = set(list(zip(*list(self.predictors.columns)))[0])
+        if feature_categories == {"Chemical"}:
+            # keep the strong confitional on chemical features
+            weak_features = {"Chemical": base_weak_chemical}
+        else:
+            # keep the strong conditional on full feature set
+            weak_features = {
+                "MS Intensity": ("penalty_start", "penalty_stop"),
+                "MS Count": ("start", "stop"),
+                "MS Frequency": ("cluster_coverage", "ladder"),
+                "Chemical": base_weak_chemical + pi
+            }
         for feature_type, features in weak_features.items():
             for feature in features:
-                del df[feature_type, feature]
+                if (feature_type, feature) in df:
+                    del df[feature_type, feature]
         return df
+
+    def transform_to_chem_features(self):
+        # is this the correct order, and does it matter?
+        chem_labels = [("Chemical", "Net Charge"), ("Chemical", "abs(pI - 7)"),
+                        ("Chemical", "InstabilityInd"), ("Chemical", "Aromaticity")]
+        annotation_labels = [("Annotations", c) for c in self.df["Annotations"].columns]
+        return self.df.filter(items=chem_labels + annotation_labels)
 
     def transform_to_core_features(self):
         core_labels = [("MS Intensity", "start"), ("MS Intensity", "stop"),

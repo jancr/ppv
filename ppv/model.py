@@ -54,8 +54,33 @@ class PPVModel:
             #  pm.model_to_graphviz(model)
         return model
 
+    #  def _create_model(self):
+    #      categorical = self.predictors["MS Bool"]
+    #      zX = (((self.predictors.ppv.drop("MS Bool") - self.meanx.drop("MS Bool")) /
+    #            self.scalex.drop("MS Bool")).values)
+    #      y = self.target.astype(int).values
+    #      shape = zX.shape
+    #      if self.mini_batch:
+    #          zX = pm.Minibatch(zX, batch_size=self.mini_batch)
+    #          y = pm.Minibatch(y, batch_size=self.mini_batch)
+    #      with pm.Model() as model:
+    #          #  sampling the categorical data with metropolis is probbably a bad idea
+    #          zbeta0 = pm.Normal('zbeta0', mu=0, sd=2)
+    #          zbetaj = pm.Normal('zbetaj', mu=0, sd=2, shape=shape[1])
+    #          if len(categorical) != 0:
+    #              bbetaj = pm.Normal('bbetaj', mu=0, sd=2, shape=categorical.shape[1])
+    #
+    #          self.metropolis = pm.Metropolis(vars=[bbetaj])
+    #          self.nuts = pm.Slice(vars=[zbetaj])
+    #          p = pm.invlogit(zbeta0 + pm.math.dot(zX, zbetaj) + pm.math.dot(categorical, bbetaj))
+    #          likelihood = pm.Bernoulli('likelihood', p, observed=y, total_size=shape[0])  # noqa
+    #          #  pm.model_to_graphviz(model)
+    #      return model
+
     @classmethod
     def load(cls, path, true_prior=None):
+        if issubclass(path.__class__, cls):
+            return self
         self = pickle.load(open(path, 'rb'))
         if true_prior:
             # old versions only had 1 intercept
@@ -107,31 +132,47 @@ class PPVModel:
             n_row, n_col = shape
         fig = plt.figure(figsize=(n_col * axes_size, n_row * axes_size))
         axes = fig.subplots(n_row, n_col)
+        for ax in axes.flatten():
+            ax.patch.set_visible(False)
+            ax.xaxis.grid(False)
         for ax in axes.flatten()[features:]:
             ax.axis('off')
         return fig, axes.reshape(n_row, n_col)
 
-    def plot_posterior(self, save_path=None, axes_size=4, shape=None):
-        self._plot_posterior(self.beta0, self.betaj, save_path, axes_size, shape)
+    def plot_posterior(self, save_path=None, axes_size=4, shape=None, credible_interval=0.94,
+                       color_bad=True):
+        return self._plot_posterior(self.beta0, self.betaj, save_path, axes_size, shape,
+                                    credible_interval, color_bad)
 
-    def plot_zposterior(self, save_path=None, axes_size=4, shape=None):
-        self._plot_posterior(self.zbeta0, self.zbetaj, save_path, axes_size, shape)
+    def plot_zposterior(self, save_path=None, axes_size=4, shape=None, credible_interval=0.94,
+                        color_bad=True):
+        return self._plot_posterior(self.zbeta0, self.zbetaj, save_path, axes_size, shape,
+                                    credible_interval, color_bad)
 
-    def _plot_posterior(self, beta0, betaj, save_path=None, axes_size=4, shape=None):
+    def _plot_posterior(self, beta0, betaj, save_path=None, axes_size=4, shape=None,
+                        credible_interval=0.94, color_bad=True):
         fig, axes = self._predictor_canvas(self.predictors, axes_size, 1, shape=shape)
         pm.plot_posterior(beta0.values, point_estimate='mode', ax=axes[0, 0], color=color)
         axes[0, 0].set_xlabel(r'$\beta_0$ (Intercept)', fontdict=f_dict)
         axes[0, 0].set_title('', fontdict=f_dict)
         columns = self.predictors.columns
         for i, (ax, feature) in enumerate(zip(axes.flatten()[1:], columns)):
-            pm.plot_posterior(betaj[feature].values, point_estimate='mode',
-                              ax=ax, color=color)
+            pm.plot_posterior(betaj[feature].values, point_estimate='mode', 
+                            credible_interval=credible_interval, ax=ax, color=color)
             ax.set_title('', fontdict=f_dict)
             ax.set_xlabel(r'$\beta_{{{}}}$ ({})'.format(i + 1, ' '.join(feature)),
-                          fontdict=f_dict)
+                        fontdict=f_dict)
+            if color_bad and not self.is_credible(self.trace['zbetaj'][:, i], credible_interval):
+                ax.patch.set_facecolor('#FFCCCB')
+                ax.patch.set_visible(True)
         if save_path is not None:
-            fig.savefig(save_path)
+            fig.savefig(save_path, transparent=True)
         return fig
+
+    @classmethod 
+    def is_credible(cls, parameter, credible_interval=0.95):
+        min_, max_ = pm.stats.hpd(parameter, 1 - credible_interval)
+        return not (min_ < 0 < max_)
 
     ############################################################
     # properties
