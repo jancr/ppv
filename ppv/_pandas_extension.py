@@ -14,14 +14,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import tqdm
-from peputils.proteome import fasta_to_protein_hash
 from sequtils import SequenceRange
-#  from sklearn.linear_model import LogisticRegression
-#  from sklearn.preprocessing import StandardScaler
-#  from sklearn.externals import joblib
-#  from sklearn.pipeline import make_pipeline
-#  import pymc3 as pm
-#  import matplotlib.patches as mpatches
 
 # local
 from .protein import ProteinFeatureExtractor
@@ -31,14 +24,6 @@ from .model import PPVModel
 #  mpl.use('agg')
 #  Grå: R230, G231, B231
 #  Blå: R81, G96, B171
-
-#  class KnownPeptide:
-#      def __init__(self, start, stop, *args, *, type="peptide", **kwargs):
-#          self.type = type
-#          self.sr = SequenceRange(start, stop, *args, **kwargs)
-#
-#      def __getattribute__(self, name):
-#          return self.sr.__getattribute__(self.sr, name)
 
 
 def _validate(df):
@@ -79,11 +64,23 @@ class ArgumentConverter:
     def get_proteome(cls, proteome: typing.Union[str, typing.Dict[str, str]]
                      ) -> typing.Dict[str, str]:
         if isinstance(proteome, str):
-            return fasta_to_protein_hash(proteome)
+            return cls._fasta_to_protein_hash(proteome)
         elif isinstance(proteome, abc.Mapping):
             return proteome
         error = "argument proteome is not of type 'str' or 'mapping' but {}"
         raise ValueError(error.format(type(proteome)))
+
+    def _fasta_to_protein_hash(cls, fasta_file):
+        proteins = {}
+        with open(fasta_file) as fasta_file:
+            acc = None
+            for line in fasta_file:
+                if line.startswith(">"):
+                    acc = line.rstrip("\r\n>").lstrip('>').split(' ')[0]
+                    proteins[acc] = ""
+                else:
+                    proteins[acc] += line.rstrip()
+            return proteins
 
 
 @pd.api.extensions.register_dataframe_accessor("ppv_feature_extractor")

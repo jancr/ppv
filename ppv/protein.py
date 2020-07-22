@@ -21,6 +21,8 @@ from sequtils import SequenceRange
 
 FeatureTuple = collections.namedtuple("FeatureTuple", ("type", "features"))
 FeatureTupleDTyped = collections.namedtuple("FeatureTupleDTyped", ("type", "features", "dtypes"))
+PeptideVariantId = namedtuple('PeptideVariantId',
+                                ('protein_id', 'start', 'stop', 'mod_seq', 'origin'))
 
 
 class ProteinFeatureExtractor:
@@ -46,6 +48,11 @@ class ProteinFeatureExtractor:
         ("Known", "Cluster", "Intensity", "Sequence", "N Flanking", "C Flanking", "LPV"),
         ("category", int, float, str, str, str, bool))
 
+    @classmethod
+    def iterrows(self, df):
+        for id_tuple, data in self.df.iterrows():
+            yield PeptideVariantId(*id_tuple[1:]), data
+
     def __init__(self, df_protein: pd.DataFrame,
                  protein_sequence: str,
                  #  dataset_median: float,
@@ -61,7 +68,7 @@ class ProteinFeatureExtractor:
         self.known_peptides = known_peptides
         self.upf_entries = {SequenceRange(pep_var_id.start, pep_var_id.stop,
                                           full_sequence=self.protein_sequence): data.sum()
-                            for pep_var_id, data in df_protein.peptidomics.iterrows()
+                            for pep_var_id, data in self.iterrows(df_protein)
                             if data.dropna().shape[0] != 0}
         self.df = df_protein
 
@@ -478,7 +485,7 @@ class ProteinFeatureExtractor:
         histogram_am = np.zeros(length)
         #  histogram_bonds = np.zeros(length - 1)
 
-        for pep_var_id, peptide_series in df.peptidomics.iterrows():
+        for pep_var_id, peptide_series in self.iterrows(df):
             p = SequenceRange(pep_var_id.start, pep_var_id.stop)
             intensity = peptide_series.sum() / n_samples
             if pep_var_id.mod_seq.startswith('_(ac)'):
@@ -512,7 +519,7 @@ class ProteinFeatureExtractor:
     def make_sample_frequency_histogram(self, df):
         histogram_samples = pd.DataFrame(np.zeros((self.length, df.shape[1])),
                                          columns=df.columns)
-        for pep_var_id, peptide_series in df.peptidomics.iterrows():
+        for pep_var_id, peptide_series in self.iterrows(df):
             p = SequenceRange(pep_var_id.start, pep_var_id.stop)
             for group, intensity in peptide_series.dropna().iteritems():
                 histogram_samples[group][p.slice] = 1
@@ -531,27 +538,6 @@ class ProteinFeatureExtractor:
             clusters[n_clust] = SequenceRange.from_index(
                 cluster_indexes[0], cluster_indexes[-1])
         return clusters
-
-    #  @classmethod
-    #  def count_ladders_old(cls, positions, h_cluster, clusters, ladder_window=10):
-    #      # TODO: ladders should take into account the number of start stops, IE
-    #      # if 5 starts at the position and 10 peptides start 5 other places
-    #      # 5 / (5 + 10) = 1/3 <--- ideal
-    #      # 1 / (1 + 5) = 1/6  <--- how we do it now
-    #      counts = np.zeros(h_cluster.shape[0])
-    #      for position in positions:
-    #          counts[position.index] = 1
-    #      h_ladder = np.zeros(h_cluster.shape[0])
-    #
-    #      # ladders are pos +/- ladder_window, but has to stay within cluster boundaries
-    #      for position in positions:
-    #          n_cluster = h_cluster[position.index]
-    #          ladder_start = max(clusters[n_cluster].start, position.pos - ladder_window)
-    #          ladder_stop = min(clusters[n_cluster].stop, position.pos + ladder_window)
-    #          ladder_range = SequenceRange(ladder_start, ladder_stop)
-    #          h_ladder[position.index] = counts[ladder_range.slice].sum() - 1
-    #
-    #      return h_ladder
 
     @classmethod
     def count_ladders(cls, position_counts, h_cluster, clusters, ladder_window=10):
@@ -617,27 +603,6 @@ class ProteinFeatureExtractor:
         return {peptide for peptide, cluster in valid_peptides.items()
                 if cluster in fair_clusters}
 
-        #  fair_peptides = set()
-        #  for peptide in valid_peptides:
-        #      for known_peptide in known_peptides:
-        #          # if starts before
-        #          if peptide.start.pos < known_peptide.start.pos:
-        #              #  if no_aa[peptide.end_slice:known_peptide.start_slice].sum() == 0:
-        #              if no_aa[peptide.slice.stop:known_peptide.slice.start].sum() == 0:
-        #                  fair_peptides.add(peptide)
-        #                  break
-        #          # if ends after
-        #          elif peptide.stop.pos > known_peptide.stop.pos:
-        #              if no_aa[known_peptide.slice.stop:peptide.slice.start].sum() == 0:
-        #                  #  fair_peptides.add(peptide.get_pos())
-        #                  fair_peptides.add(peptide)
-        #                  break
-        #          # then it is alwaus in the same cluster!
-        #          else:
-        #              fair_peptides.add(peptide)
-        #              break
-        #  return fair_peptides
-
     @classmethod
     def get_valid_positions(cls, peptides, h_cluster):
         valid_starts = {}
@@ -666,11 +631,6 @@ class ProteinFeatureExtractor:
                     p = SequenceRange(v_start, v_stop, full_sequence=protein_sequence)
                     valid_peptides[p] = c_start
         return valid_peptides
-
-
-#  def create_lpvs(upf_peptides, h_ac, h_am, min_overlap, ptm_flag):
-#      lpv_creator = LPVCreator(upf_peptides, h_ac, h_am)
-#      return lpv_creator.predict(min_overlap, ptm_flag)
 
 
 class LPVCreator:
