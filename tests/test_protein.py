@@ -48,8 +48,8 @@ def df_glucagon():
 
 @pytest.fixture(scope='function')
 def pfe_glucagon(df_glucagon, glucagon_sequence, glucagon_known_peptides):
-    median = np.nanmedian(df_glucagon.values.flatten())
-    return ProteinFeatureExtractor(df_glucagon, glucagon_sequence, median, glucagon_known_peptides)
+    #  median = np.nanmedian(df_glucagon.values.flatten())
+    return ProteinFeatureExtractor(df_glucagon, glucagon_sequence, glucagon_known_peptides)
 
 
 class TestProteinFeatureExtractor:

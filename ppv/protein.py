@@ -21,7 +21,7 @@ from sequtils import SequenceRange
 
 FeatureTuple = collections.namedtuple("FeatureTuple", ("type", "features"))
 FeatureTupleDTyped = collections.namedtuple("FeatureTupleDTyped", ("type", "features", "dtypes"))
-PeptideVariantId = namedtuple('PeptideVariantId',
+PeptideVariantId = collections.namedtuple('PeptideVariantId',
                                 ('protein_id', 'start', 'stop', 'mod_seq', 'origin'))
 
 
@@ -47,11 +47,6 @@ class ProteinFeatureExtractor:
         "Annotations",
         ("Known", "Cluster", "Intensity", "Sequence", "N Flanking", "C Flanking", "LPV"),
         ("category", int, float, str, str, str, bool))
-
-    @classmethod
-    def iterrows(self, df):
-        for id_tuple, data in self.df.iterrows():
-            yield PeptideVariantId(*id_tuple[1:]), data
 
     def __init__(self, df_protein: pd.DataFrame,
                  protein_sequence: str,
@@ -111,21 +106,6 @@ class ProteinFeatureExtractor:
         self.lpv_creator = LPVCreator(list(self.upf_entries.keys()), self.protein_sequence,
                                       self.h_ac, self.h_am)
 
-    #  def create_imputation_df(self, delta_imputations: typing.List[float]):
-    #      if delta_imputations.min() < 0:
-    #          raise ValueError("You cannot downshift by a negative number!")
-    #      imputation_values = []
-    #      for delta_imp in delta_imputations:
-    #          imputation_values.append(max(self.log10_median - delta_imp, 0))
-    #
-    #      # TODO one of thise:
-    #      # a) make start/stop into annotatons along with:
-    #      #    is_first / is_last (next to no_aa)
-    #      #    and add thise to "Annotations"
-    #      #    a1) make a function ala "impute(imp_val) that updates "start/stop"
-    #      # b) finish the above function, by factorizing helper methods out from the one below and
-    #      #    make "Imputation" feature such as start_1 start_1.5 start_2 etc
-
     def create_feature_df(self, peptides: str = 'valid', lpv_column=True):
         ########################################
         # derived
@@ -168,6 +148,11 @@ class ProteinFeatureExtractor:
                                                                   lpvs)
             df[_index] = peptide_series
         return df.T.astype(types)
+
+    @classmethod
+    def iterrows(cls, df):
+        for id_tuple, data in df.iterrows():
+            yield PeptideVariantId(*id_tuple[1:]), data
 
     # helper methods
     def _add_features_to_peptide_series(self, peptide, index, n_cluster=-1, lpvs=None):
@@ -485,7 +470,7 @@ class ProteinFeatureExtractor:
         histogram_am = np.zeros(length)
         #  histogram_bonds = np.zeros(length - 1)
 
-        for pep_var_id, peptide_series in self.iterrows(df):
+        for pep_var_id, peptide_series in cls.iterrows(df):
             p = SequenceRange(pep_var_id.start, pep_var_id.stop)
             intensity = peptide_series.sum() / n_samples
             if pep_var_id.mod_seq.startswith('_(ac)'):
@@ -643,13 +628,13 @@ class LPVCreator:
             step 1) build a stack of sorted peptides, pop the first peptide off as a "lpv
             scaffold"
             step 2) pop off peptide, check if the peptide is within the lpv we are building
-    if true redo step 2
-    if false, calcuate the overlap
-        if the overlap is above 2, then extend, and goto 2)
-        otherwise use this peptide to start building the next lpv, goto step 2)
+                if true redo step 2
+                if false, calcuate the overlap
+                if the overlap is above 2, then extend, and goto 2)
+                otherwise use this peptide to start building the next lpv, goto step 2)
     Phase 2)
-    for each build lpv, check if there are any start/ends have ptm's, if som do split the lpv
-    accordingly
+        for each build lpv, check if there are any start/ends have ptm's, if som do split the lpv
+        accordingly
     """
 
     def __init__(self, peptides, protein_sequence, h_ac, h_am):
