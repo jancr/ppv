@@ -1,12 +1,18 @@
 # core imports
-import pickle
 import math
+import pathlib
+import pickle
+import tempfile
+import warnings
+import zipfile
 
 # 3rd party imports
 import numpy as np
 import scipy as sp
 import pandas as pd
 import pymc3 as pm
+from pymc3.backends.base import MultiTrace
+from arviz.data.inference_data import InferenceData
 from matplotlib import pyplot as plt
 
 
@@ -17,7 +23,9 @@ f_dict = {'size': 16}
 
 
 class PPVModel:
-    def __init__(self, df, mini_batch=0):
+    def __init__(self, df, true_prior=None, mini_batch=0):
+        self.df = df
+        self.true_prior = true_prior
         self.predictors = df.ppv.predictors
         self.target = df.ppv.target
         if not isinstance(mini_batch, int) or mini_batch < 0:
@@ -29,13 +37,7 @@ class PPVModel:
         self.scalex = self.predictors.std()
         self.model = self._create_model()
 
-        # refrence data info
-        data = df["Annotations", "Intensity"].values.flatten()
-        data = np.log10(data[~np.isnan(data)])
-        self.df_median = np.median(data)
-        self.df_scale = data.std()
-
-        # infered from trace
+        # inferred from trace
         self.trace = self.intercept = self.parameters = None
 
     def _create_model(self):
@@ -54,49 +56,91 @@ class PPVModel:
             #  pm.model_to_graphviz(model)
         return model
 
-    #  def _create_model(self):
-    #      categorical = self.predictors["MS Bool"]
-    #      zX = (((self.predictors.ppv.drop("MS Bool") - self.meanx.drop("MS Bool")) /
-    #            self.scalex.drop("MS Bool")).values)
-    #      y = self.target.astype(int).values
-    #      shape = zX.shape
-    #      if self.mini_batch:
-    #          zX = pm.Minibatch(zX, batch_size=self.mini_batch)
-    #          y = pm.Minibatch(y, batch_size=self.mini_batch)
-    #      with pm.Model() as model:
-    #          #  sampling the categorical data with metropolis is probbably a bad idea
-    #          zbeta0 = pm.Normal('zbeta0', mu=0, sd=2)
-    #          zbetaj = pm.Normal('zbetaj', mu=0, sd=2, shape=shape[1])
-    #          if len(categorical) != 0:
-    #              bbetaj = pm.Normal('bbetaj', mu=0, sd=2, shape=categorical.shape[1])
-    #
-    #          self.metropolis = pm.Metropolis(vars=[bbetaj])
-    #          self.nuts = pm.Slice(vars=[zbetaj])
-    #          p = pm.invlogit(zbeta0 + pm.math.dot(zX, zbetaj) + pm.math.dot(categorical, bbetaj))
-    #          likelihood = pm.Bernoulli('likelihood', p, observed=y, total_size=shape[0])  # noqa
-    #          #  pm.model_to_graphviz(model)
-    #      return model
-
     @classmethod
-    def load(cls, path, true_prior=None):
+    def load(cls, path):
+        def load_file(file_name, load_function):
+            zf.extract(file_name, str(tmp_dir))
+            return load_function(str(tmp_dir_path / file_name))
+
+        def load_pickle(file_name):
+            tmp_path = tmp_dir_path / file_name
+            zf.extract(file_name, str(tmp_dir))
+            with tmp_path.open('rb') as fh:
+                return pickle.load(fh)
+
         if issubclass(path.__class__, cls):
             return self
-        self = pickle.load(open(path, 'rb'))
-        if true_prior:
-            # old versions only had 1 intercept
-            if not hasattr(self, 'data_intercept'):
-                self.data_intercept = self.intercept
-            self.intercept = self.get_real_intercept(true_prior)
+        if zipfile.is_zipfile(path):
+            zf = zipfile.ZipFile(path, 'r')
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_dir_path = pathlib.Path(tmp_dir)
+
+                # load data
+                df = load_file('df.pickle', pd.read_pickle)
+                kwargs = load_pickle('args.pickle')
+                self = cls(df, **kwargs)
+
+                # load posterior samples
+                try:
+                    trace = load_pickle('inference_data.pickle')
+                except:
+                    # if pickle fails then we have netcdf in the zip file as a backup
+                    data_file = 'inference_data.netcdf'
+                    path_folder = pathlib.Path(path).parent
+                    zf.extract(data_file, path_folder)
+                    data_file = (path_folder / data_file).rename(path_folder / data_file)
+                    trace = InferenceData.from_netcdf(data_file)
+            self.add_trace(trace, true_prior=kwargs.get('true_prior', None))
+        else:
+            # if not zip file, then everything has been pickled together:
+            self = pickle.load(open(path, 'rb'))
+            if true_prior:
+                # old versions only had 1 intercept
+                if not hasattr(self, 'data_intercept'):
+                    self.data_intercept = self.intercept
+                self.intercept = self.get_real_intercept(true_prior)
         return self
 
+
     def save(self, path):
-        pickle.dump(self, open(path, 'wb'))
+        def save_file(file_name, save_function):
+            tmp_path = str(tmp_dir_path / file_name)
+            save_function(tmp_path)
+            zf.write(tmp_path, file_name)
+        def pickle_file(file_name, data):
+            tmp_path = tmp_dir_path / file_name
+            with tmp_path.open('wb') as fh:
+                pickle.dump(data, fh)
+            zf.write(str(tmp_path), file_name)
+            
+        _msg = None
+        if self.trace is None:
+            _msg = "saving.... obj.trace is None, hint: obj.add_trace(trace)"
+            warnings.warn(_msg, RuntimeWarning)
+        elif isinstance(self.trace, MultiTrace):
+            _msg = "obj.trace is of type MultiTrace, saving using pickle, this is suboptimal"
+            raise ValueError(_msg)
+
+        with tempfile.TemporaryDirectory() as tmp_dir, zipfile.ZipFile(path, 'w') as zf:
+            tmp_dir_path = pathlib.Path(tmp_dir)
+            if self.trace is not None:
+                save_file('inference_data.netcdf', self.trace.to_netcdf)
+                pickle_file('inference_data.pickle', self.trace)
+
+            save_file('df.pickle', self.df.to_pickle)
+            kwargs = {'mini_batch': self.mini_batch, 'true_prior': self.true_prior}
+            pickle_file('args.pickle', kwargs)
+
 
     def get_real_intercept(self, true_prior):
         data_prior = self.target.astype(bool).sum() / self.predictors.shape[0]
         return self.data_intercept - math.log(data_prior) + math.log(true_prior)
 
     def add_trace(self, trace, true_prior=None):
+        if isinstance(trace, MultiTrace):
+            _msg = ("trace should preferably be of type InferenceData, "
+                    "hint: pm.sample(..., return_inferencedata=True)")
+            warnings.warn(_msg, DeprecationWarning)
         self.trace = trace
         self.intercept = self.data_intercept = self.beta0.mean()
         if true_prior:
@@ -104,6 +148,14 @@ class PPVModel:
         self.parameters = pd.Series(self.betaj.mean(axis=0), index=self.scalex.index)
 
     def rescale_upf_data_to_refrence(self, df):
+        # reference data info
+        ref_data = self.df["Annotations", "Intensity"].values.flatten()
+        ref_data = np.log10(ref_data[~np.isnan(ref_data)])
+        self.df_median = np.median(ref_data)
+        self.df_scale = ref_data.std()
+
+
+        # new data to be rescaled
         data = df.values.flatten()
         data = np.log10(data[~np.isnan(data)])
         df_median = np.median(data)
@@ -183,7 +235,12 @@ class PPVModel:
 
     @property
     def zbeta0(self):
-        return pd.Series(self.trace['zbeta0'], name=("Intercept", "Intercept"))
+        if isinstance(self.trace, InferenceData):
+            zbeta0 = np.asarray(self.trace.posterior.data_vars['zbeta0'])
+            zbeta0 = zbeta0.reshape(-1)
+        elif isinstance(self.trace, MultiTrace):
+            zbeta0 = self.trace['zbeta0']
+        return pd.Series(zbeta0, name=("Intercept", "Intercept"))
 
     @property
     def beta0(self):
@@ -192,14 +249,22 @@ class PPVModel:
 
     @property
     def zbetaj(self):
-        return pd.DataFrame(self.trace['zbetaj'], columns=self.columns)
+        if isinstance(self.trace, InferenceData):
+            zbetaj = np.asarray(self.trace.posterior.data_vars['zbetaj'])
+            zbetaj = zbetaj.reshape(-1, zbetaj.shape[-1])
+        elif isinstance(self.trace, MultiTrace):
+            zbetaj = self.trace['zbetaj']
+        return pd.DataFrame(zbetaj, columns=self.columns)
 
     @property
     def betaj(self):
         return self.zbetaj / self.scalex
 
-    #          beta0 = trace['zbeta0'] - np.sum(trace['zbetaj'] * meanx / scalex, axis=1)
-    #          betaj = (trace['zbetaj'] / scalex)
-    #      else:
-    #          beta0 = trace['zbeta0'] - np.sum(trace['zbetaj'], axis=1)
-    #          betaj = (trace['zbetaj'])
+    #  def _extract_vector(self, name):
+    #      if isinstance(self.trace, InferenceData):
+    #          # arviz has posterior, posterior predictive etc in it's "trace" object
+    #          # also it has a shape of (samples, chains, parameters) 
+    #          np.asarray(trace.posterior.data_vars['zbetaj']).reshape(-1, shape[-1])
+    #  
+    #          return self.trace.posterior.data_vars[name]
+    #      return self.trace[name]

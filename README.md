@@ -6,14 +6,16 @@
 
 This guide assumes that [pyenv](https://github.com/pyenv/pyenv) is installed
 
-**Note:** During development Anaconda3 (`anaconda3-2019.03`) was used, but it
-should also work with python 3.9.
+**Note:** During development Anaconda3 (`anaconda3-2019.03`) was used, but some
+of the packages of this project has changed major version, I would advice you
+to use python 3.9 if you want to use tool, to save yourself the headache you
+can read about in **Notes on Dependencies** towards the end of this README
 
 First let's install and use the anaconda python we used during development:
 
 ```
-pyenv install anaconda3-2019.03
-pyenv global anaconda3-2019.03
+pyenv install 3.9.1
+pyenv global 3.9.1
 ```
 
 **Package Install:** 
@@ -174,7 +176,15 @@ bar seem to stall, when there are only the 1-5 proteins with most peptides
 left. Be patient my young padowan, the program is not stuck in an infinite
 loop, but it may take some hours to finish.
 
-### Using the Model for Prediction
+### Loading features
+
+The features from the paper can be loaded from the `ppv-data` repository:
+
+```
+dataset_features = pd.read_pickle('features/mouse_features_paper.pickle')
+```
+
+## Using the Model for Prediction
 
 When using the model for prediction, you need two things:
 
@@ -194,14 +204,16 @@ Linux distributions Theano has missing libraries, which can also cause pickeling
 ```
 import ppv
 
-model_file = ppv-data/models/model_paper_obs_data_strong.ppvmodel
+model_file = "ppv-data/models/model_paper_obs_data_strong.ppvmodel"
 model = ppv.model.PPVModel.load(model_file)
 predictions = model.predict(dataset_features)
 ```
 
 ### Training your own model 
 
-To Train a model on the set of features we used in the paper (this assumes you have the `dataset_features` from one of the above steps), first we subset the `dataset_features` to the strong features used in the paper:
+To Train a model on the set of features we used in the paper (this assumes you
+have the `dataset_features` from one of the above steps), first we subset the
+`dataset_features` to the strong features used in the paper
 
 ```
 data = dataset_features.ppv._drop_weak_features()
@@ -210,13 +222,19 @@ data = dataset_features.ppv._drop_weak_features()
 **Optional Down sampling:** Training the full model takes days, so you may want
 to down sample if you are only playing with the tool
 
-First we save the prior (True/All) so we can adjust the models intercept as if
+First we save the prior (T/(T+F)) so we can adjust the models intercept as if
 we trained on the full dataset.
+
 ```
-true_prior = data.ppv.get_prior()  # calcuate true prior before down sampling!
+true_prior = data.ppv.get_prior()
 ```
 
-let's down sample so we have 10:1 negatives to positives:
+The `true_prior` can be supplied to the `PPVModel` when it is initiated or when
+you add the samples (`trace`) after training, in the examples below we supply
+it in both chases for pedagogical reasons, if you train on all the data then it
+is redundant to supply it as the intercept does not need to be adjusted.
+
+let's down sample so we have a 10:1 negatives to positives ratio:
 
 ```
 down_sample = 10
@@ -230,22 +248,30 @@ data = pd.concat((positives, negatives.sample(negative_samples)))
 
 Create a Model object from the data:
 ```
-model = PPVModel(data)
+model = ppv.model.PPVModel(data, true_prior=true_prior)
 ```
 
-Draw 7x2000 samples from the model and add them to the model object:
+draw 7x2000 samples from the model and add them to the model object:
 
 ```
 with model.model:
-	trace = pm.sample(2000, cores=7, chains=7, target_accept=0.9)
+	trace = pm.sample(2000, cores=7, chains=7, target_accept=0.9, return_inferencedata=True)
 model.add_trace(trace, true_prior=true_prior)
 ```
+
+**Note:** If you are playing with the tool, then set `chains=4`, `cores=4`, and
+`samples=500`, to make finish faster.
 
 **Optional:** Save the model
 
 ```
-model.save("pickle/model_{}.ppvmodel".format(base_name))
+model.save("model_name.ppvmodel")
 ```
+
+**Note:** Earlier versions of the package pickled the entire `PPVModel` object.
+This has made it hard to unpickle the objects unless you have specific versions
+of `pymc3`, `arviz` and `pandas`, the newest version pickle each object by
+itself and zips them all together and should thus make the models more portable.
 
 
 ## Notes on Dependencies
