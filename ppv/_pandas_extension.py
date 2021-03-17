@@ -230,7 +230,7 @@ class PandasDataFramePPVFeatures:
         return df
 
     def get_prior(self):
-        return self.target.astype(bool).sum() / self.target.shape[0]
+        return float(self.target.astype(bool).sum() / self.target.shape[0])
 
     @classmethod
     def _seq_to_modseq(cls, row):

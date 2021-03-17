@@ -15,7 +15,6 @@ from pymc3.backends.base import MultiTrace
 from arviz.data.inference_data import InferenceData
 from matplotlib import pyplot as plt
 
-
 # kruschke style plots
 plt.style.use('seaborn-white')
 color = '#87ceeb'
@@ -82,14 +81,17 @@ class PPVModel:
 
                 # load posterior samples
                 try:
-                    trace = load_pickle('inference_data.pickle')
+                    trace = load_pickle('inference_samples.pickle')
                 except:
-                    # if pickle fails then we have netcdf in the zip file as a backup
-                    data_file = 'inference_data.netcdf'
-                    path_folder = pathlib.Path(path).parent
-                    zf.extract(data_file, path_folder)
-                    data_file = (path_folder / data_file).rename(path_folder / data_file)
-                    trace = InferenceData.from_netcdf(data_file)
+                    try:
+                        trace = load_pickle('inference_data.pickle')
+                    except:
+                        # if pickle fails then we have netcdf in the zip file as a backup
+                        data_file = 'inference_data.netcdf'
+                        path_folder = pathlib.Path(path).parent
+                        zf.extract(data_file, path_folder)
+                        data_file = (path_folder / data_file).rename(path_folder / data_file)
+                        trace = InferenceData.from_netcdf(data_file)
             self.add_trace(trace, true_prior=kwargs.get('true_prior', None))
         else:
             # if not zip file, then everything has been pickled together:
@@ -102,7 +104,25 @@ class PPVModel:
         return self
 
 
-    def save(self, path):
+    def save(self, path: str, inference_data_format: str='pickle'):
+        """
+        Save the object to disk, This is done by creating 3 temporary files based on
+        :code:`self.df`, :code:`self.trace` and a code:`dict` with all other fields needed to
+        recreate the object.
+
+        :param path: path to file
+        :param infrence_data_format: how :code:`self.trace` is saved to disk: 
+            
+            * pickle or large: the full object is pickled (expect GB file size)
+            * netcdf: the full object is saved as a netcdf5 file (expect GB file size)
+            * samples or small: only the posterior samples will be pickled (expect MB file size)
+
+        If you expect to use the model with :code:`arviz` to do posterior predictive check or fancy
+        plots, then pickle or netcdf should be chosen if you expect to only use it for prediction
+        then samples is sufficient
+
+        """
+
         def save_file(file_name, save_function):
             tmp_path = str(tmp_dir_path / file_name)
             save_function(tmp_path)
@@ -118,18 +138,31 @@ class PPVModel:
             _msg = "saving.... obj.trace is None, hint: obj.add_trace(trace)"
             warnings.warn(_msg, RuntimeWarning)
         elif isinstance(self.trace, MultiTrace):
-            _msg = "obj.trace is of type MultiTrace, saving using pickle, this is suboptimal"
+            _msg = "obj.trace is of type MultiTrace, InferenceData should be used instead"
             raise ValueError(_msg)
 
         with tempfile.TemporaryDirectory() as tmp_dir, zipfile.ZipFile(path, 'w') as zf:
             tmp_dir_path = pathlib.Path(tmp_dir)
-            if self.trace is not None:
-                save_file('inference_data.netcdf', self.trace.to_netcdf)
-                pickle_file('inference_data.pickle', self.trace)
 
             save_file('df.pickle', self.df.to_pickle)
             kwargs = {'mini_batch': self.mini_batch, 'true_prior': self.true_prior}
             pickle_file('args.pickle', kwargs)
+
+            if self.trace is None:
+                return
+            if inference_data_format in ('pickle', 'large'):
+                pickle_file('inference_data.pickle', self.trace)
+            elif inference_data_format == 'netcdf':
+                save_file('inference_data.netcdf', self.trace.to_netcdf)
+            elif inference_data_format in ('samples', 'small'):
+                #  posterior = {'zbeta0': self.trace.posterior.data_vars['zbeta0'],
+                #               'zbetaj': self.trace.posterior.data_vars['zbetaj']}
+                posterior = {'zbeta0': self.zbeta0, 'zbetaj': self.zbetaj}
+                pickle_file('inference_samples.pickle', posterior)
+            else:
+                valid_strings = ', '.join(('pickle', 'netcdf', 'samples', 'large', 'small'))
+                raise ValueError(f"inference_data_format must be one of: {valid_strings}")
+
 
 
     def get_real_intercept(self, true_prior):
@@ -238,7 +271,7 @@ class PPVModel:
         if isinstance(self.trace, InferenceData):
             zbeta0 = np.asarray(self.trace.posterior.data_vars['zbeta0'])
             zbeta0 = zbeta0.reshape(-1)
-        elif isinstance(self.trace, MultiTrace):
+        elif isinstance(self.trace, (MultiTrace, dict)):
             zbeta0 = self.trace['zbeta0']
         return pd.Series(zbeta0, name=("Intercept", "Intercept"))
 
@@ -252,7 +285,7 @@ class PPVModel:
         if isinstance(self.trace, InferenceData):
             zbetaj = np.asarray(self.trace.posterior.data_vars['zbetaj'])
             zbetaj = zbetaj.reshape(-1, zbetaj.shape[-1])
-        elif isinstance(self.trace, MultiTrace):
+        elif isinstance(self.trace, (MultiTrace, dict)):
             zbetaj = self.trace['zbetaj']
         return pd.DataFrame(zbetaj, columns=self.columns)
 
