@@ -4,6 +4,7 @@ from typing import Collection
 #  import math
 import itertools
 import collections
+import warnings
 #  import typing
 
 # 3rd party imports
@@ -28,6 +29,12 @@ PeptideVariantId = collections.namedtuple('PeptideVariantId',
 class ProteinFeatureExtractor:
     """
     This function holds all the matrices needed to create MS and Chemical features for peptides
+
+    
+    Args:
+        drop_exception: if true drop rows that are not found in :code:`protein_sequence`,
+            default behavior is to throw an exception. This is useful if you do not have the exact
+            fasta file which was used by the search database.
     """
 
     ms_intensity_features = FeatureTuple(
@@ -51,7 +58,8 @@ class ProteinFeatureExtractor:
     def __init__(self, df_protein: pd.DataFrame,
                  protein_sequence: str,
                  #  dataset_median: float,
-                 known_peptides: Collection = frozenset()):
+                 known_peptides: Collection = frozenset(),
+                 drop_exceptions=False):
         if not isinstance(protein_sequence, str):
             raise AttributeError("protein_sequence must of type 'str'")
         self.length = len(protein_sequence)
@@ -61,10 +69,31 @@ class ProteinFeatureExtractor:
         self.campaign_id, self.protein_id = df_protein.index[0][:2]
         self.n_samples = df_protein.shape[1]
         self.known_peptides = known_peptides
-        self.upf_entries = {SequenceRange(pep_var_id.start, pep_var_id.stop,
-                                          full_sequence=self.protein_sequence): data.sum()
-                            for pep_var_id, data in self.iterrows(df_protein)
-                            if data.dropna().shape[0] != 0}
+
+        #  self.upf_entries = {SequenceRange(pep_var_id.start, pep_var_id.stop,
+        #                                  full_sequence=self.protein_sequence): data.sum()
+        #                      for pep_var_id, data in self.iterrows(df_protein)
+        #                      if data.dropna().shape[0] != 0}
+        self.upf_entries = {}
+        for pep_var_id, data in self.iterrows(df_protein.copy()):
+            if data.dropna().shape[0] == 0:
+                continue
+
+            # Note:
+            # currently it only fails if it's to long, there are no checks that the
+            # coordinates points to the 'correct' sequence
+            try:
+                sr = SequenceRange(pep_var_id.start, pep_var_id.stop,
+                                            full_sequence=self.protein_sequence)
+            except ValueError as e:
+                _id = f"{pep_var_id.protein_id}:{pep_var_id.start}:{pep_var_id.stop}"
+                if drop_exceptions:
+                    warnings.warn(f"{_id} not Found", UserWarning)
+                    df_protein = df_protein.drop(pep_var_id)
+                    continue
+                raise ValueError(f"{_id} not Found in {self.protein_sequence}")
+            self.upf_entries[sr] = data.sum()
+
         self.df = df_protein
 
         (self.h, self.h_start, self.h_stop, self.h_ac, self.h_am, self.h_bond, self.h_first,

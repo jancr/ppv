@@ -56,7 +56,7 @@ class PPVModel:
         return model
 
     @classmethod
-    def load(cls, path):
+    def load(cls, path, tmp_dir=None):
         def load_file(file_name, load_function):
             zf.extract(file_name, str(tmp_dir))
             return load_function(str(tmp_dir_path / file_name))
@@ -71,7 +71,7 @@ class PPVModel:
             return self
         if zipfile.is_zipfile(path):
             zf = zipfile.ZipFile(path, 'r')
-            with tempfile.TemporaryDirectory() as tmp_dir:
+            with tempfile.TemporaryDirectory(dir=tmp_dir) as tmp_dir:
                 tmp_dir_path = pathlib.Path(tmp_dir)
 
                 # load data
@@ -104,7 +104,7 @@ class PPVModel:
         return self
 
 
-    def save(self, path: str, inference_data_format: str='pickle'):
+    def save(self, path: str, inference_data_format: str='pickle', tmp_dir=None):
         """
         Save the object to disk, This is done by creating 3 temporary files based on
         :code:`self.df`, :code:`self.trace` and a code:`dict` with all other fields needed to
@@ -141,8 +141,8 @@ class PPVModel:
             _msg = "obj.trace is of type MultiTrace, InferenceData should be used instead"
             raise ValueError(_msg)
 
-        with tempfile.TemporaryDirectory() as tmp_dir, zipfile.ZipFile(path, 'w') as zf:
-            tmp_dir_path = pathlib.Path(tmp_dir)
+        with tempfile.TemporaryDirectory(dir=tmp_dir) as tmp_folder, zipfile.ZipFile(path, 'w') as zf:
+            tmp_dir_path = pathlib.Path(tmp_folder)
 
             save_file('df.pickle', self.df.to_pickle)
             kwargs = {'mini_batch': self.mini_batch, 'true_prior': self.true_prior}

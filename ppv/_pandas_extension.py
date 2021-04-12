@@ -102,7 +102,8 @@ class PandasPPV:
                           known: typing.Union[None, str, typing.Dict[str, set]] = None,
                           normalize: bool = False,
                           disable_progress_bar=False,
-                          n_cpus=4):
+                          n_cpus=4,
+                          drop_exceptions=False):
         known = ArgumentConverter.resolve_known_peptides(known)
         df = self.df
         if normalize:
@@ -120,8 +121,8 @@ class PandasPPV:
                 if len(known_peptides) == 0 and peptides == 'fair':
                     continue
                 sequence = protein_sequences[protein_id]
-                pfe, df_potein = self._get_protein_features(df_protein, sequence,
-                                                            peptides, known_peptides)
+                pfe, df_potein = self._get_protein_features(df_protein, sequence, peptides,
+                                                            known_peptides, drop_exceptions)
                 features.append(df_protein)
         else:
             exe = concurrent.futures.ProcessPoolExecutor(n_cpus)
@@ -132,7 +133,7 @@ class PandasPPV:
                     continue
                 sequence = protein_sequences[protein_id]
                 future = exe.submit(self._get_protein_features, df_protein, sequence,
-                                    peptides, known_peptides)
+                                    peptides, known_peptides, drop_exceptions)
                 futures.append(future)
 
             for future in concurrent.futures.as_completed(futures):
@@ -148,8 +149,9 @@ class PandasPPV:
         return len(self.df.index.get_level_values('protein_id').unique())
 
     def _get_protein_features(self, df_protein, protein_sequence, peptides,
-                              known_peptides):
-        pfe = ProteinFeatureExtractor(df_protein, protein_sequence, known_peptides)
+                              known_peptides, drop_exceptions):
+        pfe = ProteinFeatureExtractor(df_protein, protein_sequence, known_peptides,
+                                      drop_exceptions)
         return pfe, pfe.create_feature_df(peptides)
 
 
