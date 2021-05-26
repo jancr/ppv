@@ -21,7 +21,7 @@ color = '#87ceeb'
 f_dict = {'size': 16}
 
 
-class PPVModel:
+class BasePPVModel:
     def __init__(self, df, true_prior=None, mini_batch=0):
         self.df = df
         self.true_prior = true_prior
@@ -39,21 +39,16 @@ class PPVModel:
         # inferred from trace
         self.trace = self.intercept = self.parameters = None
 
-    def _create_model(self):
+    def _prep_data():
         zX = ((self.predictors - self.meanx) / self.scalex).values
         y = self.target.astype(int).values
-        shape = zX.shape
         if self.mini_batch:
             zX = pm.Minibatch(zX, batch_size=self.mini_batch)
             y = pm.Minibatch(y, batch_size=self.mini_batch)
-        with pm.Model() as model:
-            zbeta0 = pm.Normal('zbeta0', mu=0, sd=2)
-            zbetaj = pm.Normal('zbetaj', mu=0, sd=2, shape=shape[1])
 
-            p = pm.invlogit(zbeta0 + pm.math.dot(zX, zbetaj))
-            likelihood = pm.Bernoulli('likelihood', p, observed=y, total_size=shape[0])  # noqa
-            #  pm.model_to_graphviz(model)
-        return model
+    @abstracet
+    def _create_model(self):
+        raise NotImplementedError('I am an abstract method, implement me!')
 
     @classmethod
     def load(cls, path, tmp_dir=None):
@@ -224,19 +219,12 @@ class PPVModel:
             ax.axis('off')
         return fig, axes.reshape(n_row, n_col)
 
-    def plot_posterior(self, save_path=None, axes_size=4, shape=None, credible_interval=0.94,
-                       color_bad=True):
-        return self._plot_posterior(self.beta0, self.betaj, save_path, axes_size, shape,
-                                    credible_interval, color_bad)
-
-    def plot_zposterior(self, save_path=None, axes_size=4, shape=None, credible_interval=0.94,
-                        color_bad=True):
-        return self._plot_posterior(self.zbeta0, self.zbetaj, save_path, axes_size, shape,
-                                    credible_interval, color_bad)
-
-    def _plot_posterior(self, beta0, betaj, save_path=None, axes_size=4, shape=None,
-                        credible_interval=0.94, color_bad=True):
+    def _plot_posterior(self, betaj, save_path=None, axes_size=4, shape=None,
+                        credible_interval=0.94, color_bad=True, beta0=None):
         fig, axes = self._predictor_canvas(self.predictors, axes_size, 1, shape=shape)
+        if beta0 is None:
+            beta0 = betaj[0]
+            betaj = betaj[1:]
         pm.plot_posterior(beta0.values, point_estimate='mode', ax=axes[0, 0], color=color)
         axes[0, 0].set_xlabel(r'$\beta_0$ (Intercept)', fontdict=f_dict)
         axes[0, 0].set_title('', fontdict=f_dict)
@@ -266,6 +254,16 @@ class PPVModel:
     def columns(self):
         return self.meanx.index
 
+    #  def _extract_vector(self, name):
+    #      if isinstance(self.trace, InferenceData):
+    #          # arviz has posterior, posterior predictive etc in it's "trace" object
+    #          # also it has a shape of (samples, chains, parameters) 
+    #          np.asarray(trace.posterior.data_vars['zbetaj']).reshape(-1, shape[-1])
+    #  
+    #          return self.trace.posterior.data_vars[name]
+    #      return self.trace[name]
+
+def PPVModelPaper(BasePPVModel):
     @property
     def zbeta0(self):
         if isinstance(self.trace, InferenceData):
@@ -293,11 +291,69 @@ class PPVModel:
     def betaj(self):
         return self.zbetaj / self.scalex
 
-    #  def _extract_vector(self, name):
-    #      if isinstance(self.trace, InferenceData):
-    #          # arviz has posterior, posterior predictive etc in it's "trace" object
-    #          # also it has a shape of (samples, chains, parameters) 
-    #          np.asarray(trace.posterior.data_vars['zbetaj']).reshape(-1, shape[-1])
-    #  
-    #          return self.trace.posterior.data_vars[name]
-    #      return self.trace[name]
+
+    def _create_model(self):
+        zX, y = self._prep_data()
+        with pm.Model() as model:
+            zbeta0 = pm.Normal('zbeta0', mu=0, sd=2)
+            zbetaj = pm.Normal('zbetaj', mu=0, sd=2, shape=zX.shape[1])
+
+            p = pm.invlogit(zbeta0 + pm.math.dot(zX, zbetaj))
+            likelihood = pm.Bernoulli('likelihood', p, observed=y, total_size=y.shape[0])  # noqa
+            #  pm.model_to_graphviz(model)
+        return model
+
+    def plot_posterior(self, save_path=None, axes_size=4, shape=None, credible_interval=0.94,
+                       color_bad=True):
+        return self._plot_posterior(self.betaj, save_path, axes_size, shape,
+                                    credible_interval, color_bad, beta0=self.beta0)
+
+    def plot_zposterior(self, save_path=None, axes_size=4, shape=None, credible_interval=0.94,
+                        color_bad=True):
+        return self._plot_posterior(self.zbetaj, save_path, axes_size, shape,
+                                    credible_interval, color_bad, beta0=self.zbeta0)
+
+
+def PPVModelVector(BasePPVModel):
+    """Same as paper model, but intercept is folded into X"""
+
+    def __init__(self, df, true_prior=None, mini_batch=0):
+        super(self).__init__()
+        self.predictors["Intercept", "Intercept"] = 1
+        self.meanx["Intercept", "Intercept"] = 0
+        self.scalex["intercept", "Intercept"] = 1
+
+    @property
+    def zbetaj(self):
+        if isinstance(self.trace, InferenceData):
+            zbetaj = np.asarray(self.trace.posterior.data_vars['zbetaj'])
+            zbetaj = zbetaj.reshape(-1, zbetaj.shape[-1])
+        elif isinstance(self.trace, (MultiTrace, dict)):
+            zbetaj = self.trace['zbetaj']
+        return pd.DataFrame(zbetaj, columns=self.columns)
+
+    @property
+    def betaj(self):
+        return self.zbetaj / self.scalex
+
+
+    def _create_model(self):
+        zX, y = self._prep_data()
+        with pm.Model() as model:
+            zbetaj = pm.Normal('zbetaj', mu=0, sd=2, shape=zX.shape[1])
+
+            p = pm.invlogit(zbeta0 + pm.math.dot(zX, zbetaj))
+            likelihood = pm.Bernoulli('likelihood', p, observed=y, total_size=y.shape[0])  # noqa
+            #  pm.model_to_graphviz(model)
+        return model
+
+    def plot_posterior(self, save_path=None, axes_size=4, shape=None, credible_interval=0.94,
+                       color_bad=True):
+        return self._plot_posterior(self.betaj, save_path, axes_size, shape,
+                                    credible_interval, color_bad)
+
+    def plot_zposterior(self, save_path=None, axes_size=4, shape=None, credible_interval=0.94,
+                        color_bad=True):
+        return self._plot_posterior(self.zbetaj, save_path, axes_size, shape,
+                                    credible_interval, color_bad)
+

@@ -8,4 +8,4 @@ tqdm
 modlamp
 pymc3
 sequtils @ git+git://github.com/jancr/sequtils.git#egg=sequtils
-peputils @ git+ssh://git@github.com/jancr/peputils.git#egg=peputils
+#peputils @ git+ssh://git@github.com/jancr/peputils.git#egg=peputils
