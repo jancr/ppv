@@ -5,6 +5,7 @@ import pickle
 import tempfile
 import warnings
 import zipfile
+import abc
 
 # 3rd party imports
 import numpy as np
@@ -34,20 +35,23 @@ class BasePPVModel:
         # scale data
         self.meanx = self.predictors.mean()
         self.scalex = self.predictors.std()
-        self.model = self._create_model()
+        zX, y = self._prep_data()
+
+        if self.mini_batch:
+            zX = pm.Minibatch(zX, batch_size=self.mini_batch)
+            y = pm.Minibatch(y, batch_size=self.mini_batch)
+        self.model = self._create_model(zX, y)
 
         # inferred from trace
         self.trace = self.intercept = self.parameters = None
 
-    def _prep_data():
+    def _prep_data(self):
         zX = ((self.predictors - self.meanx) / self.scalex).values
         y = self.target.astype(int).values
-        if self.mini_batch:
-            zX = pm.Minibatch(zX, batch_size=self.mini_batch)
-            y = pm.Minibatch(y, batch_size=self.mini_batch)
+        return zX, y
 
-    @abstracet
-    def _create_model(self):
+    @abc.abstractmethod
+    def _create_model(self, zX, y):
         raise NotImplementedError('I am an abstract method, implement me!')
 
     @classmethod
@@ -71,6 +75,7 @@ class BasePPVModel:
 
                 # load data
                 df = load_file('df.pickle', pd.read_pickle)
+                #  df = load_pickle('df.pickle')
                 kwargs = load_pickle('args.pickle')
                 self = cls(df, **kwargs)
 
@@ -99,7 +104,7 @@ class BasePPVModel:
         return self
 
 
-    def save(self, path: str, inference_data_format: str='pickle', tmp_dir=None):
+    def save(self, path: str, inference_data_format: str='pickle', protocol=None, tmp_dir=None):
         """
         Save the object to disk, This is done by creating 3 temporary files based on
         :code:`self.df`, :code:`self.trace` and a code:`dict` with all other fields needed to
@@ -125,7 +130,7 @@ class BasePPVModel:
         def pickle_file(file_name, data):
             tmp_path = tmp_dir_path / file_name
             with tmp_path.open('wb') as fh:
-                pickle.dump(data, fh)
+                pickle.dump(data, fh, protocol=protocol)
             zf.write(str(tmp_path), file_name)
             
         _msg = None
@@ -139,7 +144,7 @@ class BasePPVModel:
         with tempfile.TemporaryDirectory(dir=tmp_dir) as tmp_folder, zipfile.ZipFile(path, 'w') as zf:
             tmp_dir_path = pathlib.Path(tmp_folder)
 
-            save_file('df.pickle', self.df.to_pickle)
+            save_file('df.pickle', lambda s: self.df.to_pickle(s, protocol=protocol))
             kwargs = {'mini_batch': self.mini_batch, 'true_prior': self.true_prior}
             pickle_file('args.pickle', kwargs)
 
@@ -263,7 +268,8 @@ class BasePPVModel:
     #          return self.trace.posterior.data_vars[name]
     #      return self.trace[name]
 
-def PPVModelPaper(BasePPVModel):
+
+class PPVModelPaper(BasePPVModel):
     @property
     def zbeta0(self):
         if isinstance(self.trace, InferenceData):
@@ -292,15 +298,13 @@ def PPVModelPaper(BasePPVModel):
         return self.zbetaj / self.scalex
 
 
-    def _create_model(self):
-        zX, y = self._prep_data()
+    def _create_model(self, zX, y):
         with pm.Model() as model:
             zbeta0 = pm.Normal('zbeta0', mu=0, sd=2)
             zbetaj = pm.Normal('zbetaj', mu=0, sd=2, shape=zX.shape[1])
 
             p = pm.invlogit(zbeta0 + pm.math.dot(zX, zbetaj))
             likelihood = pm.Bernoulli('likelihood', p, observed=y, total_size=y.shape[0])  # noqa
-            #  pm.model_to_graphviz(model)
         return model
 
     def plot_posterior(self, save_path=None, axes_size=4, shape=None, credible_interval=0.94,
@@ -314,14 +318,18 @@ def PPVModelPaper(BasePPVModel):
                                     credible_interval, color_bad, beta0=self.zbeta0)
 
 
-def PPVModelVector(BasePPVModel):
+class PPVModelVector(BasePPVModel):
     """Same as paper model, but intercept is folded into X"""
 
     def __init__(self, df, true_prior=None, mini_batch=0):
-        super(self).__init__()
+        super().__init__(df, true_prior, mini_batch)
+
+    def _prep_data(self):
+        # add intercept as 'predictor variable' and ensure that intercept is not 'scaled'
         self.predictors["Intercept", "Intercept"] = 1
         self.meanx["Intercept", "Intercept"] = 0
-        self.scalex["intercept", "Intercept"] = 1
+        self.scalex["Intercept", "Intercept"] = 1
+        return super()._prep_data()
 
     @property
     def zbetaj(self):
@@ -337,12 +345,11 @@ def PPVModelVector(BasePPVModel):
         return self.zbetaj / self.scalex
 
 
-    def _create_model(self):
-        zX, y = self._prep_data()
+    def _create_model(self, zX, y):
         with pm.Model() as model:
             zbetaj = pm.Normal('zbetaj', mu=0, sd=2, shape=zX.shape[1])
 
-            p = pm.invlogit(zbeta0 + pm.math.dot(zX, zbetaj))
+            p = pm.invlogit(pm.math.dot(zX, zbetaj))
             likelihood = pm.Bernoulli('likelihood', p, observed=y, total_size=y.shape[0])  # noqa
             #  pm.model_to_graphviz(model)
         return model

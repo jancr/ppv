@@ -19,7 +19,7 @@ from sequtils import SequenceRange
 # local
 from .protein import ProteinFeatureExtractor
 from .split import XFold
-from .model import PPVModel
+from .model import BasePPVModel
 
 #  mpl.use('agg')
 #  Grå: R230, G231, B231
@@ -401,7 +401,7 @@ class PandasDataFramePPVFeatures:
         unknown = df.ppv.negatives.ppv.predictors
 
         #  fig, axes = self._predictor_canvas(axes_size)
-        fig, axes = PPVModel._predictor_canvas(self.predictors, axes_size, shape=shape)
+        fig, axes = BasePPVModel._predictor_canvas(self.predictors, axes_size, shape=shape)
         for ax, feature in zip(axes.flatten(), df.ppv.predictors.columns):
             bins = np.linspace(df[feature].min(), df[feature].max(), 15)
             ax.hist(known[feature], bins, density=True, alpha=0.5, color='g')
