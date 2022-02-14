@@ -458,6 +458,15 @@ class PandasDataFramePPVFeatures:
         # check that XFold uses no names that don't exist anymore.
 
         xfold = XFold(n_folds, n_known_peptides, n_unknown_peptides, validation)
+
+        # Annotate the dataframe.
+        self.df[('Annotations', 'Fold')] = -1
+
+        for fold in xfold:
+            idx = fold.index
+            proteins = fold.proteins.keys()
+            self.df.loc[self.df.index.isin(proteins, level=1), ('Annotations', 'Fold')] = idx
+
         return xfold
 
     def _drop_weak_features(self):
