@@ -447,18 +447,17 @@ class PandasDataFramePPVFeatures:
         # just like a "negative" that does not have a upf_start and end are not considered either
         #  n_known_peptides = collections.defaultdict(int)
 
-        import colored_traceback.auto; import ipdb; ipdb.set_trace()  # noqa
-        n_known_peptides = {}
-        print(self.df["known"].sum())
-        # self.findable = [{} for _ in range(self.n_upf_files)]
-        #  for protein_id, known_peptides in self.known_peptides.items():
-        #      for i, peptide_scorers in enumerate(self.peptide_scorers):
-        #          if protein_id in peptide_scorers:
-        #              ps = peptide_scorers[protein_id]
-        #              if len(ps.findable) != 0 and len(ps.findable) != len(ps.valid_peptides):
-        #                  n_known_peptides[protein_id] += len(ps.findable)
+        # Gather number of known peptides per protein from df.
+        peptide_counts_per_protein = self.df['Annotations'].groupby(level=1)['Known'].value_counts().unstack().to_dict()
+        n_known_peptides: typing.Dict[str, int] = peptide_counts_per_protein[True]
 
-        xfold = XFold(n_folds, dict(n_known_peptides), validation)
+        n_unknown_peptides: typing.Dict[str, int] = peptide_counts_per_protein[False]
+
+
+        # make n_known_peptides dict
+        # check that XFold uses no names that don't exist anymore.
+
+        xfold = XFold(n_folds, n_known_peptides, n_unknown_peptides, validation)
         return xfold
 
     def _drop_weak_features(self):

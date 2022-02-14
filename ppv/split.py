@@ -1,7 +1,14 @@
-
+'''
+Methods for stratified splitting of peptides. Ensure that all peptides of a given protein
+are assigned to the same partition. 
+Note that the trade() methods to iteratively refine assignments currently do not handle
+negative peptides and are not used.
+'''
 # core imports
 import math
+from typing import Dict, Tuple
 
+from torch import negative
 __slots__ = ('Fold', 'XFold')
 
 
@@ -9,15 +16,17 @@ __slots__ = ('Fold', 'XFold')
 # XFold and Fold class
 ################################################################################
 class Fold():
-    """Class that represend each of the folds when doing X-fold evaluation"""
-    def __init__(self, peptide_goal, protein_goal, fold_index=0,
-                 holdout_fold=False, validation_fold=False):
-        self.peptide_count = 0
+    """Class that represent each of the folds when doing X-fold evaluation"""
+    def __init__(self, positive_peptide_goal: float, negative_peptide_goal: float, protein_goal: float, fold_index: int =0,
+                 holdout_fold: bool = False, validation_fold: bool = False):
+        self.positive_peptide_count = 0
+        self.negative_peptide_count = 0
         self.protein_count = 0
-        self.proteins = {}
+        self.proteins: Dict[str, Tuple[int, int]] = {}
         self.index = fold_index
 
-        self.peptide_goal = peptide_goal
+        self.positive_peptide_goal = positive_peptide_goal
+        self.negative_peptide_goal =  negative_peptide_goal
         self.protein_goal = protein_goal
         self.protein_goal_high = math.ceil(protein_goal)
         self.protein_goal_low = math.floor(protein_goal)
@@ -28,25 +37,30 @@ class Fold():
     def perfect_protein(self):
         return abs(self.protein_count - self.protein_goal) < 1
 
-    def perfect_peptide(self):
-        return abs(self.peptide_count - self.peptide_goal) < 1
+    def perfect_positive_peptide(self):
+        return abs(self.positive_peptide_count - self.positive_peptide_goal) < 1
+
+    def perfect_negative_peptide(self):
+        return abs(self.negative_peptide_count - self.negative_peptide_goal) < 1
 
     def is_perfect(self):
-        return self.perfect_peptide() and self.perfect_protein()
+        return self.perfect_positive_peptide() and self.perfect_negative_peptide() and self.perfect_protein()
 
-    def add(self, protein_id, peptide_count):
+    def add(self, protein_id: str, positive_peptide_count: int, negative_peptide_count: int):
         if protein_id in self.proteins:
             raise KeyError("{} is already in this fold!".format(protein_id))
-        self.proteins[protein_id] = peptide_count
-        self.peptide_count += peptide_count
+        self.proteins[protein_id] = (positive_peptide_count, negative_peptide_count)
+        self.positive_peptide_count += positive_peptide_count
+        self.negative_peptide_count += negative_peptide_count
         self.protein_count += 1
 
-    def remove(self, protein_id):
-        peptide_count = self.proteins[protein_id]
-        self.peptide_count -= peptide_count
+    def remove(self, protein_id: str):
+        positive_peptide_count, negative_peptide_count = self.proteins[protein_id]
+        self.positive_peptide_count -= positive_peptide_count
+        self.negative_peptide_count -= negative_peptide_count
         self.protein_count -= 1
         del self.proteins[protein_id]
-        return peptide_count
+        return positive_peptide_count
 
     def is_holdout_fold(self):
         return self.holdout_fold
@@ -57,12 +71,12 @@ class Fold():
     def __eq__(self, other):
         if not isinstance(other, self.__class__):
             return False
-        _self = (self.peptide_count, self.protein_count, self.proteins)
-        _other = (other.peptide_count, other.protein_count, other.proteins)
+        _self = (self.positive_peptide_count, self.negative_peptide_count, self.protein_count, self.proteins)
+        _other = (other.positive_peptide_count, self.negative_peptide_count, other.protein_count, other.proteins)
         return _self == _other
 
     def __str__(self):
-        return ' '.join(map(str, (self.protein_count, self.peptide_count, self.proteins)))
+        return ' '.join(map(str, (self.protein_count, self.positive_peptide_count, self.negative_peptide_count)))
 
     def __repr__(self):
         return self.__str__()
@@ -72,29 +86,36 @@ class XFold():
     """XFold class that perform balanced split by putting all peptides from
     one protein into the same bin.
     """
-    def __init__(self, n_folds: int, positives, holdout_fold=None, validation_fold=None, run=True):
+    def __init__(self, n_folds: int, positives: Dict[str, int], negatives: Dict[str, int], holdout_fold=None, validation_fold=None, run=True):
         self.n_folds = n_folds
         self.positives = positives
+        self.negatives = negatives
         self.validation_fold = validation_fold
         self.holdout_fold = holdout_fold
 
         self.positives = dict(positives)
+        self.negatives = dict(negatives)
+
         if len(positives) == 0:
             raise ValueError("The dataset has no known peptides :(")
+        if len(negatives) == 0:
+            raise ValueError("The dataset has no unknown peptides :(")
 
-        peptide_goal = sum(positives.values()) / n_folds
+        positive_peptide_goal = sum(positives.values()) / n_folds
+        negative_peptide_goal = sum(negatives.values()) / n_folds
         protein_goal = len(positives) / n_folds
 
         self.folds = []
         for i in range(n_folds):
-            fold = Fold(peptide_goal, protein_goal, i,
+            fold = Fold(positive_peptide_goal, negative_peptide_goal, protein_goal, i,
                         holdout_fold=i == holdout_fold,
                         validation_fold=i == validation_fold)
             self.folds.append(fold)
 
         if run:
-            self.distribute(positives)
-            self.trade()
+            self.distribute_positives(positives, negatives)
+            self.distribute_negatives(positives, negatives)
+            #self.trade_positives()
 
     def __len__(self):
         return self.n_folds
@@ -125,7 +146,7 @@ class XFold():
             if high_count in skip:
                 continue
             skip.add(high_count)
-            target_count = fold_low.peptide_count - fold_high.peptide_goal + high_count
+            target_count = fold_low.positive_peptide_count - fold_high.positive_peptide_goal + high_count
             low_id, low_count = cls._find_one(fold_low, target_count)
             new_diff = abs(target_count - low_count)
             if new_diff < smallest_diff:
@@ -141,48 +162,70 @@ class XFold():
 
     def _find_one(fold, target):
         count_iter = iter(fold.proteins.items())
-        best_id, best_count = next(count_iter)
-        for protein_id, peptide_count in count_iter:
-            if abs(peptide_count - target) < abs(best_count - target):
-                best_count = peptide_count
+        best_id, (best_positive_count, best_negative_count) = next(count_iter)
+        for protein_id, (positive_peptide_count, negative_peptide_count) in count_iter:
+            if abs(positive_peptide_count - target) < abs(best_positive_count - target):
+                best_positive_count = positive_peptide_count
+                best_negative_count = negative_peptide_count
                 best_id = protein_id
-        return best_id, best_count
+        return best_id, best_positive_count, best_negative_count
 
     @classmethod
     def _move_one(cls, fold_high, fold_low):
-        target_count = fold_high.peptide_goal - fold_low.peptide_count
-        best_id, best_count = cls._find_one(fold_high, target_count)
-        fold_low.add(best_id, best_count)
+        target_count = fold_high.positive_peptide_goal - fold_low.positive_peptide_count
+        best_id, best_positive_count, best_negative_count = cls._find_one(fold_high, target_count)
+        fold_low.add(best_id, best_positive_count, best_negative_count)
         fold_high.remove(best_id)
 
     @staticmethod
-    def _distribute_key(fold):
+    def _distribute_pos_key(fold):
         """the mosth "worthy" fold is the one with fewest peptides and most
         proteins - index is part of the key to make the bins more "stable"
         between runs"""
         # index added to min key to make the folds always yield the same folds
-        return fold.peptide_count, -fold.protein_count, fold.index
+        return fold.positive_peptide_count, -fold.protein_count, fold.index
 
-    def distribute(self, positives):
-        """iteratively give the protein with the most peptides to the fold
-        with the fewest peptides"""
-        _sorted_data = sorted(positives.items(), key=lambda x: -x[1])
+    def distribute_positives(self, positives, negatives):
+        """iteratively give the protein with the most positive peptides to the fold
+        with the fewest peptides. Ingore proteins with negative peptides only."""
+        _distribute_pos_key = lambda x: (x.positive_peptide_count, -x.protein_count, x.index)
+
+        _filtered_data = filter(lambda x: x[1]>0, positives.items())
+        _sorted_data = sorted(_filtered_data, key=lambda x: -x[1])
         for protein_id, n_peptides in _sorted_data:
-            fold = min(self.folds, key=self._distribute_key)
-            fold.add(protein_id, n_peptides)
+            fold = min(self.folds, key=_distribute_pos_key)
+            fold.add(protein_id, n_peptides, negatives[protein_id])
+
+    def distribute_negatives(self, positives, negatives):
+        """iteratively give the protein with the most negative peptides to the fold
+        with the fewest negative peptides. Ignore proteins with positive peptides - those
+        were already assigned."""
+        _distribute_neg_key = lambda x: (x.negative_peptide_count, -x.protein_count, x.index)
+
+        have_positives = filter(lambda x: x[1]>0, positives.items())
+        have_positives = set([x[0] for x in have_positives])
+
+        _filtered_data = filter(lambda x: x[0] not in have_positives, negatives.items())
+        _sorted_data = sorted(_filtered_data, key=lambda x: -x[1])
+        for protein_id, n_peptides in _sorted_data:
+            fold = min(self.folds, key=_distribute_neg_key)
+            fold.add(protein_id, positives[protein_id], n_peptides)
 
     @staticmethod
-    def _trade_key(fold):
-        return fold.protein_count, fold.peptide_count
+    def _trade_pos_key(fold):
+        return fold.protein_count, fold.positive_peptide_count
 
-    def trade(self, max_iterations=100):
+    def trade_positives(self, max_iterations=100):
         """iteratively give a protein from the fold with most proteins,
         to the fold with the fewest"""
+        
+        _trade_pos_key = lambda x: (x.protein_count, x.positive_peptide_count)
+
         for i in range(max_iterations):
             if self.is_perfect():
                 break
-            high_fold = max(self.folds, key=self._trade_key)
-            low_fold = min(self.folds, key=self._trade_key)
+            high_fold = max(self.folds, key=_trade_pos_key)
+            low_fold = min(self.folds, key=_trade_pos_key)
             self.move_closest(high_fold, low_fold)
         else:  # no break
             raise RuntimeError("The fold-split did not converge")
