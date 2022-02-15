@@ -4,23 +4,29 @@ Save results (performance of each fold) as csv.
 
 If applicable for the model type, we perform grid searches in the inner loop 
 to find the best cross-validated set of hyperparameters.
+
+This was written to be run on HPC nodes, so it parallelizes as much as 
+possible and starts many parallel processes. (parallize different models, grid search, and inner loop training)
+
 '''
 
 from concurrent.futures import ProcessPoolExecutor
 import pandas as pd
 import numpy as np
+import pickle
+import os
 from typing import Dict, Tuple, Callable, Any, List, Optional
+
+# modeling stuff.
 import sklearn
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GridSearchCV
-from sklearn.svm import SVC
+from sklearn.svm import SVC, LinearSVC
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import roc_auc_score, make_scorer
+from sklearn.metrics import roc_auc_score
 from ppv.model import PPVModelVector
-import pickle
-import os
 
 
 
@@ -58,6 +64,7 @@ def train_eval_bayes_logreg(train_X: pd.DataFrame,
                             valid_y: pd.Series,
                             test_X: pd.DataFrame,
                             test_y: pd.DataFrame,
+                            config: Dict[str, Any],
                             ) -> Tuple[np.ndarray, np.ndarray, PPVModelVector]:
 
     prior = float(train_y.astype(bool).sum() / train_y.shape[0])
@@ -125,7 +132,7 @@ def train_eval_svm(train_X: pd.DataFrame,
                              config: Dict[str, Any],
                              ) -> Tuple[np.ndarray, Pipeline]:
 
-    model = Pipeline([('scaler', StandardScaler()), ('svc', SVC(**config))])
+    model = Pipeline([('scaler', StandardScaler()), ('svc', LinearSVC(**config))])
     model.fit(train_X, train_y)
 
     valid_probs = model.decision_function(valid_X.values)
@@ -136,7 +143,7 @@ def train_eval_svm(train_X: pd.DataFrame,
 
 # Define the models we use and the helper functions to learn them.
 MODEL_DICT = {
-    'SVC': (SVC, train_eval_svm),
+    'SVC': (LinearSVC, train_eval_svm),
     'b_logreg': (PPVModelVector, train_eval_bayes_logreg),
     'f_logreg': (LogisticRegression, train_eval_freq_logreg),
     'f_loreg_smote': (LogisticRegression, train_eval_freq_logreg_smote),
@@ -144,12 +151,47 @@ MODEL_DICT = {
 }
 
 
+def _run_inner_fold(validation_fold: int, 
+                    test_fold: int,
+                    inner_folds: List[int],
+                    df: pd.DataFrame, 
+                    test_X: pd.DataFrame,
+                    test_y: pd.Series,
+                    best_config: Dict[str, Any],
+                    model_train_fn: Callable, 
+                    feature_columns: List[Tuple[str, str]], 
+                    target_column: Tuple[str, str], 
+                    model_save_path:str):
+    '''Define operations in inner loop as function so that it can be parallelized.'''
+    train_folds = [x for x in inner_folds if x != validation_fold]
+
+    train_df = df.loc[df['Annotations']['Fold'].isin(train_folds)] 
+    valid_df = df.loc[df['Annotations']['Fold'] == validation_fold]
+
+    train_folds = [x for x in inner_folds if x != validation_fold]
+
+    train_df = df.loc[df['Annotations']['Fold'].isin(train_folds)] 
+    valid_df = df.loc[df['Annotations']['Fold'] == validation_fold]
+
+    train_X, train_y = train_df[feature_columns], train_df[target_column]
+    valid_X, valid_y = valid_df[feature_columns], valid_df[target_column]
+
+    valid_probs, test_probs, model = model_train_fn(train_X, train_y, valid_X, valid_y, test_X, test_y, best_config)
+
+    valid_auc = roc_auc_score(valid_y.cat.codes, valid_probs)
+    test_auc = roc_auc_score(test_y.cat.codes, test_probs)
+    
+    # save all models with pickle to be library agnostic.
+    pickle.dump(model, open(os.path.join(model_save_path, f'model_t{test_fold}_v{validation_fold}.pkl'), 'wb'))
+    return valid_auc, test_auc
+
 
 def nested_cv_loop(
     df: pd.DataFrame, 
     model_name: str, 
     model_save_path: str,
-    search_grid: Optional[Dict[str, List[Any]]] = None
+    search_grid: Optional[Dict[str, List[Any]]] = None,
+    parallelize_inner: bool = False
     ) -> pd.Series:
     """Outer loop for testing, inner loop for validation. trains n_fold * (n_fold-1) models and evaluates test performances.
 
@@ -183,41 +225,48 @@ def nested_cv_loop(
         test_df = df.loc[df['Annotations']['Fold'] == test_fold]
         test_X, test_y = test_df[feature_columns], test_df[target_column]
 
-
+        # standard cross-validation over the inner folds.
         inner_folds =  [x for x in outer_folds if x != test_fold]
-        # standard cross-validation.
-        for validation_fold in inner_folds:
+        
+        # If we have a grid, first perform grid search for the inner loop folds. Then make all the inner loop models
+        # and predict the test set.
+        if search_grid is not None:
+            best_config, results_table = cv_gridsearch(df, model_name, search_grid, test_fold)
+            results_table.to_csv(os.path.join(model_save_path, f'gridsearch_t{test_fold}.csv'))
+            print(f'Outer loop {test_fold}: Best config:', best_config)
+        else:
+            best_config = {}        
+    
 
-            # If we have a grid, first perform grid search in the inner loop. Then make all the inner loop models
-            # and predict the test set.
-            if search_grid is not None:
-                best_config, results_table = cv_gridsearch(df, model_name, search_grid, test_fold)
-                results_table.to_csv(os.path.join(model_save_path, f'gridsearch_t{test_fold}.csv'))
-                print(f'Outer loop {test_fold}: Best config:', best_config)
-            else:
-                best_config = {}
 
-            train_folds = [x for x in inner_folds if x != validation_fold]
 
-            train_df = df.loc[df['Annotations']['Fold'].isin(train_folds)] 
-            valid_df = df.loc[df['Annotations']['Fold'] == validation_fold]
 
-            train_X, train_y = train_df[feature_columns], train_df[target_column]
-            valid_X, valid_y = valid_df[feature_columns], valid_df[target_column]
+        jobs = {}
+        if parallelize_inner:
+            with ProcessPoolExecutor(max_workers=4) as executor:
+                for validation_fold in inner_folds:
+                    future = executor.submit(_run_inner_fold, validation_fold, test_fold, inner_folds, df, test_X, test_y, best_config, model_train_fn, feature_columns, target_column, model_save_path)
+                    jobs[(test_fold, validation_fold)] = future
 
-            valid_probs, test_probs, model = model_train_fn(train_X, train_y, valid_X, valid_y, test_X, test_y, best_config)
+                for k, future in jobs.items():
+                    valid_auc, test_auc = future.result()
+                    print(model_name, test_fold, validation_fold, valid_auc)
+                    results[k] = test_auc 
 
-            valid_auc = roc_auc_score(valid_y.cat.codes, valid_probs)
-            test_auc = roc_auc_score(test_y.cat.codes, test_probs)
-            print(validation_fold, valid_auc)
-            results[(test_fold, validation_fold)] = test_auc
 
-            # save all models with pickle to be library agnostic.
-            pickle.dump(model, open(os.path.join(model_save_path, f'model_t{test_fold}_v{validation_fold}.pkl'), 'wb'))
+        else:
+            for validation_fold in inner_folds:
+
+                valid_auc, test_auc = _run_inner_fold(validation_fold, test_fold, inner_folds, df, test_X, test_y, best_config, model_train_fn, feature_columns, target_column, model_save_path)
+                print(model_name, test_fold, validation_fold, valid_auc)
+                results[(test_fold, validation_fold)] = test_auc            
+
+            
 
 
     results = pd.Series(results)
     results.name = model_name
+    pd.DataFrame(results).to_csv(os.path.join(model_save_path, 'test_performances.csv'))
     return results
 
 
@@ -255,7 +304,7 @@ def cv_gridsearch(
             ])
     else:
         model = MODEL_DICT[model_name][0]()
-    
+
     search = GridSearchCV(model, grid, cv=cv_idx, refit=False, scoring='roc_auc', n_jobs=30, verbose=1)
 
     # Set up train data and run search.
@@ -263,7 +312,8 @@ def cv_gridsearch(
     train_df = make_features_numerical(train_df)
     search.fit(train_X.values.copy(), train_y.cat.codes.values.copy())
 
-    return search.best_params_, pd.DataFrame.from_dict(search.cv_results_)
+    best_params = {k.removeprefix('clf__'):v for k,v in search.best_params_.items()}
+    return best_params, pd.DataFrame.from_dict(search.cv_results_)
 
 
 
@@ -271,18 +321,18 @@ def cv_gridsearch(
 def main():
     df =  pd.read_pickle('mouse_features_paper.pickle')
 
-    from concurrent.futures import ThreadPoolExecutor
+    #nested_cv_loop(df, 'SVC', 'debug/cv_svc', {'clf__C': [1, 10, 100], 'clf__max_iter':[2000]} )
 
     runs = [
-        (df, 'bayes_logreg','debug/cv_bayes_logreg/', None),
-        (df, 'RF', 'debug/cv_rf/', {'n_estimators':[10,30,50,70,90,100,120], 'max_depth':[3,5,10, 100]}),
-        (df, 'f_logreg', 'debug/cv_f_logreg/', None),
-        (df, 'f_logreg_smote', 'debug/cv_f_logreg_smote/', None),
-        (df, 'SVC', 'debug/cv_svc', {'C': [1, 10, 100], 'kernel': ['linear', 'rbf']} )
+        (df, 'b_logreg','debug/cv_bayes_logreg/', None, True),
+        (df, 'RF', 'debug/cv_rf/', {'n_estimators':[30,50,70,90,100,120, 140], 'max_depth':[3,5,10, 100]}, True),
+        (df, 'f_logreg', 'debug/cv_f_logreg/', None, True),
+        (df, 'f_logreg_smote', 'debug/cv_f_logreg_smote/', None, True),
+        (df, 'SVC', 'debug/cv_svc', {'clf__C': [1, 10, 100], 'clf__max_iter':[3000]} )
     ]
 
     jobs = []
-    with ProcessPoolExecutor(max_workers=5) as executor:
+    with ProcessPoolExecutor(max_workers=4) as executor:
         for run_params in runs:
             future = executor.submit(nested_cv_loop, *run_params)
             jobs.append(future)
