@@ -25,6 +25,7 @@ def main():
     #labels = df['Annotations']['Known'].cat.codes.values # Index and Series objects work differently.
     #partition_assignments = partition_assignment(proteins, tissues, labels, n_partitions=5, n_class=2, n_kingdoms=7)
     #df[('Annotations', 'Partition')] = partition_assignments.astype(int)
+    df = df.ppv.observed
     df.ppv.generate_xfolds()
 
     print('Label balance')
