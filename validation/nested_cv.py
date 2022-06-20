@@ -15,18 +15,20 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
+import argparse
 from typing import Dict, Tuple, Callable, Any, List, Optional
 
 # modeling stuff.
 import sklearn
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import GridSearchCV
-from sklearn.svm import SVC, LinearSVC
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import LinearSVC
 from sklearn.metrics import roc_auc_score
-from ppv.model import PPVModelVector
+from sklearn.model_selection import GridSearchCV
+from skopt import BayesSearchCV
+from ppv.model import PPVModelPaper
 
 
 
@@ -65,14 +67,14 @@ def train_eval_bayes_logreg(train_X: pd.DataFrame,
                             test_X: pd.DataFrame,
                             test_y: pd.DataFrame,
                             config: Dict[str, Any],
-                            ) -> Tuple[np.ndarray, np.ndarray, PPVModelVector]:
+                            ) -> Tuple[np.ndarray, np.ndarray, PPVModelPaper]:
 
     prior = float(train_y.astype(bool).sum() / train_y.shape[0])
     import pymc3 as pm
 
     train_X = train_X.copy()
     train_X[('Annotations', 'Known')] = train_y # add y back to dataframe because of PPVModel implementation.
-    model =  PPVModelVector(train_X, true_prior = prior)
+    model =  PPVModelPaper(train_X, true_prior = prior)
     
     with model.model:
         trace = pm.sample(2000, cores=7, chains=7, target_accept=0.9, return_inferencedata=True)
@@ -101,6 +103,25 @@ def train_eval_freq_logreg(train_X: pd.DataFrame,
     test_probs =  model.predict_proba(test_X.values)
 
     return valid_probs[:,1], test_probs[:,1], model
+
+def train_eval_elasticnet(train_X: pd.DataFrame, 
+                             train_y: pd.Series, 
+                             valid_X: pd.DataFrame, 
+                             valid_y: pd.Series,
+                             test_X: pd.DataFrame,
+                             test_y: pd.DataFrame,
+                             config: Dict[str, Any],
+                             ) -> Tuple[np.ndarray, Pipeline]:
+
+    train_X = make_features_numerical(train_X)
+    model = Pipeline([('scaler', StandardScaler()), ('logreg', LogisticRegression(penalty='elasticnet',**config, solver='saga', max_iter=5000, tol=1e-4))])
+    model.fit(train_X.values, train_y.cat.codes)
+
+    valid_probs = model.predict_proba(valid_X.values)
+    test_probs =  model.predict_proba(test_X.values)
+
+    return valid_probs[:,1], test_probs[:,1], model
+
 
 def train_eval_freq_logreg_smote(train_X: pd.DataFrame, 
                              train_y: pd.Series, 
@@ -133,21 +154,23 @@ def train_eval_svm(train_X: pd.DataFrame,
                              ) -> Tuple[np.ndarray, Pipeline]:
 
     model = Pipeline([('scaler', StandardScaler()), ('svc', LinearSVC(**config))])
-    model.fit(train_X, train_y)
+    train_X = make_features_numerical(train_X)
+    model.fit(train_X.values, train_y.cat.codes)
 
     valid_probs = model.decision_function(valid_X.values)
     test_probs =  model.decision_function(test_X.values)
 
-    return valid_probs[:,1], test_probs[:,1], model
+    return valid_probs, test_probs, model
 
 
 # Define the models we use and the helper functions to learn them.
 MODEL_DICT = {
     'SVC': (LinearSVC, train_eval_svm),
-    'b_logreg': (PPVModelVector, train_eval_bayes_logreg),
+    'b_logreg': (PPVModelPaper, train_eval_bayes_logreg),
     'f_logreg': (LogisticRegression, train_eval_freq_logreg),
-    'f_loreg_smote': (LogisticRegression, train_eval_freq_logreg_smote),
-    'RF': (RandomForestClassifier, train_eval_random_forest)
+    'f_logreg_smote': (LogisticRegression, train_eval_freq_logreg_smote),
+    'RF': (RandomForestClassifier, train_eval_random_forest),
+    'elasticnet': (LogisticRegression, train_eval_elasticnet)
 }
 
 
@@ -212,7 +235,13 @@ def nested_cv_loop(
     
     model_train_fn = MODEL_DICT[model_name][1]
 
-    feature_columns = df.columns[df.columns.get_level_values(0).str.startswith('MS')]
+    exclude_features = [
+        (    'MS Count',             'start'),
+        (    'MS Count',             'stop'),
+        (    'MS Frequency',        'protein_coverage'),
+        (    'MS Frequency',        'cluster_coverage'),
+    ]
+    feature_columns = df.columns[ (df.columns.get_level_values(0).str.startswith('MS')) & ~(df.columns.isin(exclude_features))]    
     target_column =  ( 'Annotations','Known')
 
 
@@ -231,7 +260,7 @@ def nested_cv_loop(
         # If we have a grid, first perform grid search for the inner loop folds. Then make all the inner loop models
         # and predict the test set.
         if search_grid is not None:
-            best_config, results_table = cv_gridsearch(df, model_name, search_grid, test_fold)
+            best_config, results_table = cv_hyperparameter_search(df, model_name, search_grid, test_fold)
             results_table.to_csv(os.path.join(model_save_path, f'gridsearch_t{test_fold}.csv'))
             print(f'Outer loop {test_fold}: Best config:', best_config)
         else:
@@ -271,14 +300,20 @@ def nested_cv_loop(
 
 
 
-def cv_gridsearch(
+def cv_hyperparameter_search(
     df: pd.DataFrame, 
     model_name: str,
-    grid: Dict[str, List[Any]],
+    search_space: Dict[str, List[Any]],
     test_fold: int,
     ) -> Dict[str, Any]:
 
-    feature_columns = df.columns[df.columns.get_level_values(0).str.startswith('MS')]
+    exclude_features = [
+        (    'MS Count',             'start'),
+        (    'MS Count',             'stop'),
+        (    'MS Frequency',        'protein_coverage'),
+        (    'MS Frequency',        'cluster_coverage'),
+    ]
+    feature_columns = df.columns[ (df.columns.get_level_values(0).str.startswith('MS')) & ~(df.columns.isin(exclude_features))]    
     target_column =  ( 'Annotations','Known')
 
     folds = list(df['Annotations']['Fold'].unique())
@@ -302,10 +337,20 @@ def cv_gridsearch(
             ('scaler', StandardScaler()), 
             ('clf', MODEL_DICT[model_name][0]())
             ])
+    elif model_name == 'elasticnet':
+        model = Pipeline([
+            ('scaler', StandardScaler()), 
+            ('clf',LogisticRegression(penalty='elasticnet', solver='saga', max_iter=5000, tol=1e-4))
+            ])
     else:
         model = MODEL_DICT[model_name][0]()
 
-    search = GridSearchCV(model, grid, cv=cv_idx, refit=False, scoring='roc_auc', n_jobs=30, verbose=1)
+
+    #if the search space contains lists of values, it's a grid. else bayesian.
+    if type(list(search_space.values())[0]) == list:
+        search = GridSearchCV(model, search_space, cv=cv_idx, refit=False, scoring='roc_auc', n_jobs=30, verbose=1)
+    else:
+        search = BayesSearchCV(model, search_space, cv=cv_idx, refit=False, scoring='roc_auc', n_jobs=30, verbose=1)
 
     # Set up train data and run search.
     train_X, train_y = train_df[feature_columns], train_df[target_column]
@@ -316,19 +361,30 @@ def cv_gridsearch(
     return best_params, pd.DataFrame.from_dict(search.cv_results_)
 
 
-
+from skopt.space import Integer, Real, Categorical
 
 def main():
-    df =  pd.read_pickle('mouse_features_paper.pickle')
+
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data', '-d', default = 'mouse_features_paper_sklearn.pickle')
+    parser.add_argument('--out_dir', '-od', default='nested_cv')
+    args = parser.parse_args()
 
     #nested_cv_loop(df, 'SVC', 'debug/cv_svc', {'clf__C': [1, 10, 100], 'clf__max_iter':[2000]} )
+    #nested_cv_loop(df, 'f_logreg_smote', 'debug/cv_f_logreg_smote/', None, False)
+    df =  pd.read_pickle(args.data)
+    df = df.loc[~(df['Annotations', 'Sequence'].str.len()>42)]
+    
 
     runs = [
-        (df, 'b_logreg','debug/cv_bayes_logreg/', None, True),
-        (df, 'RF', 'debug/cv_rf/', {'n_estimators':[30,50,70,90,100,120, 140], 'max_depth':[3,5,10, 100]}, True),
-        (df, 'f_logreg', 'debug/cv_f_logreg/', None, True),
-        (df, 'f_logreg_smote', 'debug/cv_f_logreg_smote/', None, True),
-        (df, 'SVC', 'debug/cv_svc', {'clf__C': [1, 10, 100], 'clf__max_iter':[3000]} )
+        # (df, 'b_logreg',os.path.join(args.out_dir, 'cv_bayes_logreg'), None, True),
+        (df, 'RF', os.path.join(args.out_dir, 'cv_rf'), {'n_estimators':[30,50,70,90,100,120, 140, 200], 'max_depth':[3,5,10,20, 100]}, True),
+        (df, 'elasticnet', os.path.join(args.out_dir, 'cv_elasticnet'), {
+            'clf__l1_ratio': Real(0,1), 'clf__C': Real(0.1, 10000, 'log-uniform')}, True),
+        (df, 'f_logreg', os.path.join(args.out_dir, 'cv_f_logreg'), None, True),
+        (df, 'f_logreg_smote', os.path.join(args.out_dir, 'cv_f_logreg_smote'), None, True),
+        (df, 'SVC', os.path.join(args.out_dir, 'cv_svc'), {'clf__C': [1, 10, 100], 'clf__max_iter':[3000]} )
     ]
 
     jobs = []

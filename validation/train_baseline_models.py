@@ -8,10 +8,8 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-import pymc3 as pm
+from sklearn.preprocessing import StandardScaler, QuantileTransformer
 
-from ppv.model import PPVModelPaper
 
 def make_features_numerical(df: pd.DataFrame) -> pd.DataFrame:
     '''Cannot train on boolean values.'''
@@ -28,12 +26,14 @@ def train_eval_bayes_logreg(train_X: pd.DataFrame,
                             valid_y: pd.Series,
                             test_X: pd.DataFrame,
                             test_y: pd.DataFrame,
-                            ) -> Tuple[np.ndarray, np.ndarray, PPVModelPaper]:
+                            ) -> Tuple[np.ndarray, np.ndarray, Any]:
 
+    import pymc3 as pm
     prior = float(train_y.astype(bool).sum() / train_y.shape[0])
 
     train_X = train_X.copy()
     train_X[('Annotations', 'Known')] = train_y # add y back to dataframe because of PPVModel implementation.
+    from ppv.model import PPVModelPaper
     model =  PPVModelPaper(train_X, true_prior = prior)
     
     with model.model:
@@ -56,6 +56,7 @@ def train_eval_freq_logreg(train_X: pd.DataFrame,
 
     train_X = make_features_numerical(train_X)
     model = Pipeline([('scaler', StandardScaler()), ('logreg', LogisticRegression(**config, max_iter=1000))])
+    #model = Pipeline([('scaler', QuantileTransformer(output_distribution='normal')), ('logreg', LogisticRegression(**config, max_iter=1000))])
     model.fit(train_X.values, train_y.cat.codes)
 
     valid_probs = model.predict_proba(valid_X.values)
@@ -150,19 +151,35 @@ def main():
 
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data', '-d', default = 'mouse_features_paper.pickle')
+    parser.add_argument('--data', '-d', default = 'mouse_features_paper_sklearn_with_peptideranker.pickle')
     parser.add_argument('--out_dir', '-od', default='nested_cv')
     args = parser.parse_args()
 
 
     df =  pd.read_pickle(args.data)
-
+    df = df.loc[~(df['Annotations', 'Sequence'].str.len()>42)]
     # full model (now MS only)
-    #feature_columns = df.columns[df.columns.get_level_values(0).str.startswith('MS')]
+    # feature_columns = df.columns[df.columns.get_level_values(0).str.startswith('MS')]
 
     # chemical model
     feature_columns = df.columns[df.columns.get_level_values(0).str.startswith('Chemical')]
     nested_cv_loop(df, os.path.join(args.out_dir, 'cv_chemical/'), feature_columns)
+
+    # model with length cutoff
+    # exclude_features = [
+    #     (    'MS Count',             'start'),
+    #     (    'MS Count',             'stop'),
+    #     (    'MS Frequency',        'protein_coverage'),
+    #     (    'MS Frequency',        'cluster_coverage'),
+    # ]
+    # feature_columns = df.columns[ (df.columns.get_level_values(0).str.startswith('MS')) & ~(df.columns.isin(exclude_features))]
+    # df = df.loc[~(df['Annotations', 'Known'].astype(bool) & (df['Annotations', 'Sequence'].str.len()>30))]
+    nested_cv_loop(df, os.path.join(args.out_dir, 'cv_max_pos_30aa/'), feature_columns)
+
+    # df['MS Count', 'start'] = np.log10(df['MS Count', 'start'])
+    # df['MS Count', 'stop'] = np.log10(df['MS Count', 'stop'])
+    # df['MS Frequency', 'cluster_coverage'] = np.log10(df['MS Frequency', 'cluster_coverage'])
+    # nested_cv_loop(df, os.path.join(args.out_dir, 'cv_no_start_stop_newsplit/'), feature_columns)
 
     # NOTE we do not need to actually train this when using AUC or any other rank-based metric.
     # null model
