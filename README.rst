@@ -4,8 +4,11 @@
 PPV - Predicted Peptide Variant
 ###############################
 
+.. image:: https://zenodo.org/badge/281096200.svg
+   :target: https://zenodo.org/badge/latestdoi/281096200
+
 * A Peptide Feature Extraction tool for Mass Spectrometry Data
-* A Bayesian Logistic Classifier, learning the features of uniprot annotated peptides.
+* A Logistic Classifier, learning the features of uniprot annotated peptides.
 
 ------------
 Installation 
@@ -14,6 +17,7 @@ Installation
 **Package Install:** 
 
 .. code-block:: bash
+
     pip install git+ssh://git@github.com/jancr/ppv.git#egg=ppv
 
 
@@ -22,6 +26,7 @@ Installation
 Clone the PPV repository:
 
 .. code-block:: bash
+
     mkdir ppv-project
     cd ppv-project
     git clone https://github.com/jancr/ppv.git
@@ -29,22 +34,26 @@ Clone the PPV repository:
 Install the package
 
 .. code-block:: bash
+
     cd ppv
     pip install -e .
 
 
-## Download Data
+**Download Data:**
+
 data from the paper can be found at :code:`https://github.com/jancr/ppv-data`
 
 Lets go back to the :code:`ppv-project` folder and clone this repo
 
 .. code-block:: bash
+
     cd ..
     git clone https://github.com/jancr/ppv-data
 
 Then unzip all the files
 
 .. code-block:: bash
+
     cd models
     gunzip *.gz
     cd ../features
@@ -54,6 +63,7 @@ Then unzip all the files
 Hopefully your :code:`ppv-project` directory now looks like this:
 
 .. code-block:: bash
+
     $ ls -lh
     drwxrwxr-x 6 jcr jcr 4.0K Mar  3 15:15 ppv
     drwxrwxr-x 6 jcr jcr 4.0K Mar  3 15:21 ppv-data
@@ -110,6 +120,7 @@ Example: create feature data frame for Mouse Brain
 Import statements:
 
 .. code-block:: python
+
     import pandas as pd
     import peputils
     from peputils.proteome import fasta_to_protein_hash
@@ -118,6 +129,7 @@ Import statements:
 Then we link to the files in :code:`ppv-data`:
 
 .. code-block:: python
+
     upf_file = 'upf/mouse_brain_combined.upf'
     meta_file = 'upf/mouse_brain_combined.sample.meta'
     campaign_name = "Mouse Brain"
@@ -128,17 +140,20 @@ Then we now create a upf data frame, we do this using data frame method
 :code:`.peptidomics.load_upf_meta`, which is defined in :code:`peputils`:
 
 .. code-block:: python
+
     df_raw = pd.DataFrame.peptidomics.load_upf_meta(upf_file, meta_file, campaign_name)
 
 We then normalize this dataframe such that all the peptides found across all
 samples sum to the same, to correct for different sample loading.
 
 .. code-block:: python
+
     df = df_raw.peptidomics.normalize()
 
 Now we have a normalized peptidomics dataframe, it looks like this:
 
 .. code-block:: python
+
     df.head()
 
 
@@ -153,6 +168,7 @@ The above dataframe is what is needed for feature extraction, to extract
 features from the df use the following method:
 
 .. code-block:: python
+
     n_cpu = 8
     mouse_proteins = fasta_to_protein_hash(mouse_fasta)
 
@@ -167,45 +183,26 @@ bar seem to stall, when there are only the 1-5 proteins with most peptides
 left. Be patient my young padowan, the program is not stuck in an infinite
 loop, but it may take some hours to finish.
 
+
 ----------------
 Loading features
 ----------------
 
-TODO: UPDATE THIS TEXT WHEN YOU UNDERSTAND FELIXES STUFF
-
 The features from the paper can be loaded from the :code:`ppv-data` repository:
 
 .. code-block:: python
+
     dataset_features = pd.read_pickle('features/mouse_features_paper.pickle')
 
-## Using the Model for Prediction
+--------------------------------
+Using the Model for Prediction
+--------------------------------
 
-When using the model for prediction, you need two things:
+See section 4 of the next section
 
-1. Features: Here we will use
-   :code:`ppv-data/features/mouse_features_paper.pickle`, which was also used
-   in the paper.
-2. A model: Here we will use the model from the paper
-   :code:`ppv-data/models/model_paper_obs_data_strong.ppvmodel`
-
-If you have some other data or have trained your own model, this guide should still work
-
-First let's load the features and model
-
-**Note:** The :code:`.ppvmodel` files have been pickled with python 3.7, with pandas
-version 0.24.3, and cannot be unpickeled by pandas 1.0 or newer, also on some
-Linux distributions Theano has missing libraries, which can also cause pickeling issues.
-
-.. code-block:: python
-    import ppv
-
-    model_file = "ppv-data/models/model_paper_obs_data_strong.ppvmodel"
-    model = ppv.model.PPVModel.load(model_file)
-    predictions = model.predict(dataset_features)
-
-=======================
+#######################
 Training your own model 
-=======================
+#######################
 
 -------------------------------------------------
 1. Splitting the data for nested cross-validation
@@ -251,6 +248,7 @@ the notebooks are saved in markdown format, to convert them to interactive noteb
 
 
 .. code-block:: bash
+
    python -m jupytext --to notebook notebooks/manuscript_figures.ipynb
    python -m jupytext --to notebook notebooks/plot_validation.ipynb
 
@@ -262,6 +260,7 @@ the notebooks are saved in markdown format, to convert them to interactive noteb
 The full PPV model is an ensemble of the cross-validated models. To apply it to new data, use the following code snippet that takes care of averaging the 20 predictions.
 
 .. code-block:: python
+
     def make_features_numerical(df: pd.DataFrame) -> pd.DataFrame:
         '''Cannot train on boolean values.'''
         df = df.copy()
@@ -272,6 +271,7 @@ The full PPV model is an ensemble of the cross-validated models. To apply it to 
         return df
 
 .. code-block:: python
+
     def predict_probabilities(df, model_dir: str = "nested_cv/cv_f_logreg", folds = [0,1,2,3,4]):
 
         df_X = make_features_numerical(df_X)
@@ -300,4 +300,6 @@ The full PPV model is an ensemble of the cross-validated models. To apply it to 
     feature_columns = df.columns[ (df.columns.get_level_values(0).str.startswith('MS')) & ~(df.columns.isin(exclude_features))]    
 
     df['Annotations', 'PPV'] = predict_probabilities(df[feature_columns])
-    ```
+
+
+
