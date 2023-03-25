@@ -54,7 +54,7 @@ Then unzip all the files
 
 .. code-block:: bash
 
-    cd models
+    cd ppv-data/models
     gunzip *.gz
     cd ../features
     gunzip mouse_features_paper.pickle.gz
