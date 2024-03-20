@@ -272,9 +272,13 @@ The full PPV model is an ensemble of the cross-validated models. To apply it to 
 
 .. code-block:: python
 
+    import os
+    import pickle
+    import numpy as np
+
     def predict_probabilities(df, model_dir: str = "nested_cv/cv_f_logreg", folds = [0,1,2,3,4]):
 
-        df_X = make_features_numerical(df_X)
+        df_X = make_features_numerical(df)
         X =  df_X.values
 
         all_probs = []
@@ -284,7 +288,7 @@ The full PPV model is an ensemble of the cross-validated models. To apply it to 
                 if val == test:
                     continue
 
-                model = pickle.load(open(os.path.join(results_dir, f'model_t{test}_v{val}.pkl'), 'rb'))
+                model = pickle.load(open(os.path.join(model_dir, f'model_t{test}_v{val}.pkl'), 'rb'))
                 probs = model.predict_proba(X)[:, 1]
                 all_probs.append(probs)
 
@@ -296,6 +300,7 @@ The full PPV model is an ensemble of the cross-validated models. To apply it to 
         (    'MS Count',             'stop'),
         (    'MS Frequency',        'protein_coverage'),
         (    'MS Frequency',        'cluster_coverage'),
+        (     'MS Bool',            'observed'),
     ]
     feature_columns = df.columns[ (df.columns.get_level_values(0).str.startswith('MS')) & ~(df.columns.isin(exclude_features))]    
 
