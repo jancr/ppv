@@ -7,5 +7,7 @@ pandas
 tqdm
 modlamp
 pymc3
-sequtils @ git+git://github.com/jancr/sequtils.git#egg=sequtils
-#peputils @ git+ssh://git@github.com/jancr/peputils.git#egg=peputils
+scikit-optimize
+torch
+sequtils @ git+https://github.com/jancr/sequtils.git#egg=sequtils
+#peputils @ git+https://git@github.com/jancr/peputils.git#egg=peputils
