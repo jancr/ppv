@@ -1,10 +1,12 @@
 # core imports
 #  from typing import Mapping, Collection
+import pathlib
 import concurrent.futures
+import concurrent.futures.process
 import collections
 import typing
 from collections import abc
-#  import pickle
+import pickle
 import math
 import warnings
 
@@ -19,7 +21,7 @@ from sequtils import SequenceRange
 # local
 from .protein import ProteinFeatureExtractor
 from .split import XFold
-from .model import BasePPVModel
+#from .model import BasePPVModel
 
 #  mpl.use('agg')
 #  Grå: R230, G231, B231
@@ -53,6 +55,8 @@ class ArgumentConverter:
                                ) -> typing.Dict[str, set]:
         if known_peptides is None:
             return {}
+        if isinstance(known_peptides, pathlib.Path):
+            return cls.get_known_peptides(known_peptides)
         elif isinstance(known_peptides, abc.Collection):
             if isinstance(known_peptides, str):
                 return cls.get_known_peptides(known_peptides)
@@ -95,20 +99,33 @@ class PandasPPV:
         self.df = df
         self.n_samples = self.df.shape[1]
 
+    def rescale_data(self, m=7.183446537216282, sd=0.9450988351278504):
+        df = np.log10(self.df)
+        sd_scale = sd / ((df).var() ** 0.5)
+        df_rescald = (df - df.mean()) * sd_scale + m
+        return 10 ** df_rescald
+
     def create_feature_df(self,
                           protein_sequences: typing.Union[str, typing.Dict[str, set]],
                           #  delta_imp: int = 4,
                           peptides: str = 'valid',
                           known: typing.Union[None, str, typing.Dict[str, set]] = None,
                           normalize: bool = False,
+                          #  rescale: bool = False,
                           disable_progress_bar=False,
                           n_cpus=4,
-                          drop_exceptions=False):
+                          drop_exceptions=False,
+                          continue_path=None):
         known = ArgumentConverter.resolve_known_peptides(known)
         df = self.df
         if normalize:
             df = df.peptidomics.normalize()
-        #  median = np.nanmedian(df.values.flatten())
+        #  if rescale:
+        #      df = self.rescale_data(df)
+        if isinstance(continue_path, str):
+            continue_path = pathlib.Path(continue_path)
+            if not continue_path.is_dir():
+                continue_path.mkdir(parents=True)
 
         features = []
         futures = []
@@ -121,8 +138,9 @@ class PandasPPV:
                 if len(known_peptides) == 0 and peptides == 'fair':
                     continue
                 sequence = protein_sequences[protein_id]
-                pfe, df_potein = self._get_protein_features(df_protein, sequence, peptides,
-                                                            known_peptides, drop_exceptions)
+                pfe, df_protein = self._get_protein_features(df_protein, sequence, peptides,
+                                                            known_peptides, drop_exceptions,
+                                                            continue_path=continue_path)
                 features.append(df_protein)
         else:
             exe = concurrent.futures.ProcessPoolExecutor(n_cpus)
@@ -133,12 +151,19 @@ class PandasPPV:
                     continue
                 sequence = protein_sequences[protein_id]
                 future = exe.submit(self._get_protein_features, df_protein, sequence,
-                                    peptides, known_peptides, drop_exceptions)
+                                    peptides, known_peptides, drop_exceptions,
+                                    continue_path=continue_path)
                 futures.append(future)
-
+#30/6 juli august
             for future in concurrent.futures.as_completed(futures):
+                #  try:
                 pfe, df_protein = future.result()
                 features.append(df_protein)
+                #  except concurrent.futures.process.BrokenProcessPool as e:
+                #      protein_id = df_protein.index.get_level_values(1)[0]
+                #      print(protein_id, 'failed')
+                    
+                #pickle.dump(features, open(f'/mnt/groningenomics/results/tmp/ppv/{protein_id}.pickle', "wb"))
                 progress_bar.update(1)
 
         df_features = pd.concat(features)
@@ -149,10 +174,21 @@ class PandasPPV:
         return len(self.df.index.get_level_values('protein_id').unique())
 
     def _get_protein_features(self, df_protein, protein_sequence, peptides,
-                              known_peptides, drop_exceptions):
+                              known_peptides, drop_exceptions, continue_path=None):
+
+        protein_id = df_protein.index.get_level_values(1)[0]
         pfe = ProteinFeatureExtractor(df_protein, protein_sequence, known_peptides,
                                       drop_exceptions)
-        return pfe, pfe.create_feature_df(peptides)
+        if continue_path is not None:
+            path = continue_path / f"{protein_id}.pickle"
+            if path.exist():
+                return pfe, pickle.load(open(path, 'rb'))
+
+        df_protein_features = pfe.create_feature_df(peptides)
+        if continue_path is not None:
+            path = continue_path / f"{protein_id}.pickle"
+            pickle.dump(df_protein_features, open(path, "wb"))
+        return pfe, df_protein_features
 
 
 @pd.api.extensions.register_series_accessor("ppv")

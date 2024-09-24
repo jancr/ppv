@@ -183,6 +183,30 @@ class ProteinFeatureExtractor:
         for id_tuple, data in df.iterrows():
             yield PeptideVariantId(*id_tuple[1:]), data
 
+    def _get_feature_series(self):
+        if not hasattr(self, '_series'):
+            initial_data = {
+                self.ms_intensity_features.type: dict.fromkeys(self.ms_intensity_features.features, np.nan),
+                self.ms_bool_features.type: dict.fromkeys(self.ms_bool_features.features, False),
+                self.ms_frequency_features.type: dict.fromkeys(self.ms_frequency_features.features, np.nan),
+                self.ms_count_features.type: dict.fromkeys(self.ms_count_features.features, 0),
+                self.chemical_features.type: dict.fromkeys(self.chemical_features.features, np.nan),
+            }
+
+            annotation_data = {}
+            for feature in self.annotations.features:
+                for dtype, feature in zip(self.annotations.dtypes, self.annotations.features):
+                    if dtype == "category":
+                        annotation_data[feature] = pd.Categorical([np.nan], categories=[False, True])
+                    else:
+                        annotation_data[feature] = dtype()
+
+            initial_data[self.annotations.type] = annotation_data
+            initial_data = {(inner_index, outer_index): data for (inner_index, inner) in initial_data.items() 
+                                                             for outer_index, data in inner.items()}
+            self._series = pd.Series(initial_data)
+        return self._series.copy()
+
     # helper methods
     def _add_features_to_peptide_series(self, peptide, index, n_cluster=-1, lpvs=None):
         # primary intensity weights d = delta, pd = penalty delta
@@ -206,8 +230,10 @@ class ProteinFeatureExtractor:
         i_start = peptide.start.index
         i_stop = peptide.stop.index
 
+        series = self._get_feature_series()
+
         # MS Delta
-        series = pd.Series(np.zeros(len(index)) * np.nan, index=index)
+        #series = pd.Series(np.zeros(len(index)) * np.nan, index=index)
         ms_int = self.ms_intensity_features.type
         series[ms_int, 'start'] = self.start_scores[i_start]
         series[ms_int, 'stop'] = self.stop_scores[i_stop]
@@ -535,8 +561,8 @@ class ProteinFeatureExtractor:
                                          columns=df.columns)
         for pep_var_id, peptide_series in self.iterrows(df):
             p = SequenceRange(pep_var_id.start, pep_var_id.stop)
-            for group, intensity in peptide_series.dropna().iteritems():
-                histogram_samples[group][p.slice] = 1
+            for group, intensity in peptide_series.dropna().items():
+                histogram_samples.loc[p.slice, group] = 1
         if not (0 <= histogram_samples.shape[1] <= self.n_samples):
             raise ValueError("max_samples, higher than the accual number of samples!!!")
         return histogram_samples.sum(axis=1).values / self.n_samples

@@ -1,3 +1,4 @@
 # local imports
 from . import _pandas_extension  # noqa
-from . import model
+from ._predict import predict
+#from . import model

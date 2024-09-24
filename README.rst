@@ -164,24 +164,45 @@ Now we have a normalized peptidomics dataframe, it looks like this:
 So much like the :code:`.upf` file we have 1 row for each observed peptide and 1 column
 for each sample abundance.
 
+
+**Very important:** if you use your own data, then you have to rescale it to
+follow the same abundance ditribution as our data before feature extraction!,
+this can be done either by preprocessing the data as follows:
+
+.. code-block:: python
+
+    df = df.ppv_feature_extractor.rescale_data()
+
+
 The above dataframe is what is needed for feature extraction, to extract
 features from the df use the following method:
+
 
 .. code-block:: python
 
     n_cpu = 8
     mouse_proteins = fasta_to_protein_hash(mouse_fasta)
 
-    dataset_features = df.ppv_feature_extractor.create_feature_df(
+    dataset_features_all = df.ppv_feature_extractor.create_feature_df(
         mouse_proteins, n_cpus=n_cpu, known=known_file, peptides='valid')
+    dataset_features = dataset_features_all.ppv.observed
 
-**Note:** The feature extraction code is parallelized such that if
+
+
+
+**Note 1:** The feature extraction code is parallelized such that if
 :code:`n_cpu=8`, then it will concurrently extract features from 8 protein backbones,
 as some proteins have a much higher number of peptides than others (and the
 algorithm scales O(N^2) with the number of peptides in a protein), the progress
 bar seem to stall, when there are only the 1-5 proteins with most peptides
 left. Be patient my young padowan, the program is not stuck in an infinite
 loop, but it may take some hours to finish.
+
+**Note 2:** The pipeline was originally made to predict assembled peptides by
+predicting all combination of start/stop within a 'peptide cluser', unless you
+also want 'assembled' peptide predictions, you can filter them away by using
+the :code:`.ppv.observed` property
+
 
 
 ----------------
@@ -257,49 +278,18 @@ the notebooks are saved in markdown format, to convert them to interactive noteb
 4. Making new predictions
 -------------------------
 
-The full PPV model is an ensemble of the cross-validated models. To apply it to new data, use the following code snippet that takes care of averaging the 20 predictions.
+The full PPV model is an ensemble of the cross-validated models. They can be
+found here `here
+<https://github.com/jancr/ppv-data/tree/master/nested_cv/cv_f_logreg>`_,
+assuming they are downloaded to :code:`nested_cv/cv_f_logreg` you can make
+predictions as follows:
 
 .. code-block:: python
 
-    def make_features_numerical(df: pd.DataFrame) -> pd.DataFrame:
-        '''Cannot train on boolean values.'''
-        df = df.copy()
-        for column in df.columns:
-            if df[column].dtype == bool:
-                df[column] = df[column].astype(int)
+   # may throw version warnings because the ppv-data was created using sklearn 1.0.2
+   prediction = ppv.predict(dataset_features, "nested_cv/cv_f_logreg")
+   dataset_features["Annotations", "PPV"] = prediction
 
-        return df
-
-.. code-block:: python
-
-    def predict_probabilities(df, model_dir: str = "nested_cv/cv_f_logreg", folds = [0,1,2,3,4]):
-
-        df_X = make_features_numerical(df_X)
-        X =  df_X.values
-
-        all_probs = []
-        # predict from all the test models and average probabilities.
-        for val in folds:
-            for test in folds:
-                if val == test:
-                    continue
-
-                model = pickle.load(open(os.path.join(results_dir, f'model_t{test}_v{val}.pkl'), 'rb'))
-                probs = model.predict_proba(X)[:, 1]
-                all_probs.append(probs)
-
-        probs = np.stack(all_probs).mean(axis=0)
-        return probs
-
-    exclude_features = [
-        (    'MS Count',             'start'),
-        (    'MS Count',             'stop'),
-        (    'MS Frequency',        'protein_coverage'),
-        (    'MS Frequency',        'cluster_coverage'),
-    ]
-    feature_columns = df.columns[ (df.columns.get_level_values(0).str.startswith('MS')) & ~(df.columns.isin(exclude_features))]    
-
-    df['Annotations', 'PPV'] = predict_probabilities(df[feature_columns])
 
 
 
